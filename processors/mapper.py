@@ -1,6 +1,9 @@
 """
 Data mapper — merges all source DataFrames into a single unified CSV.
 
+Strategy: snap all sources to the same 0.5° grid, then merge on month+grid.
+For sources with different native resolutions, we aggregate (mean/sum) per grid cell.
+
 Output schema:
   month, lat_grid, lon_grid,
   sst_mean, chlorophyll_mean, u_current_mean, v_current_mean, ssh_mean,
@@ -28,6 +31,7 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+FGI_TOLERANCE = FGI_SST_TOLERANCE
 
 
 def _snap_to_grid(df: pd.DataFrame, res: float) -> pd.DataFrame:
@@ -47,10 +51,8 @@ def _to_month(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _assign_wpp(df: pd.DataFrame) -> pd.DataFrame:
-    """Assign WPP region name based on lat/lon."""
+    """Assign WPP region name based on lat_grid/lon_grid."""
     df = df.copy()
-    if "wpp_region" in df.columns:
-        return df
 
     def _find_wpp(lat: float, lon: float) -> str:
         for name, bbox in WPP_REGIONS.items():
@@ -63,26 +65,25 @@ def _assign_wpp(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _agg_to_grid(df: pd.DataFrame, value_cols: list[str],
+                 agg: str, res: float) -> pd.DataFrame:
+    """Snap to grid, convert to monthly, aggregate value_cols."""
+    df = _snap_to_grid(_to_month(df), res)
+    key = ["month", "lat_grid", "lon_grid"]
+    return df.groupby(key)[value_cols].agg(agg).reset_index()
+
+
 def _compute_fgi(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute Fishing Ground Index (0–1).
-
     FGI = 0.6 × chl_norm  +  0.4 × sst_score
-    where:
-      chl_norm  = min-max normalised chlorophyll
-      sst_score = 1 - |SST - optimal| / tolerance  (clipped 0–1)
     """
     df = df.copy()
 
-    # Chlorophyll score
     chl = df["chlorophyll_mean"].fillna(0)
     chl_min, chl_max = chl.min(), chl.max()
-    if chl_max > chl_min:
-        df["chl_norm"] = (chl - chl_min) / (chl_max - chl_min)
-    else:
-        df["chl_norm"] = 0.0
+    df["chl_norm"] = (chl - chl_min) / (chl_max - chl_min) if chl_max > chl_min else 0.0
 
-    # SST score
     sst = df["sst_mean"].fillna(FGI_OPTIMAL_SST)
     df["sst_score"] = (1 - (sst - FGI_OPTIMAL_SST).abs() / FGI_TOLERANCE).clip(0, 1)
 
@@ -91,12 +92,7 @@ def _compute_fgi(df: pd.DataFrame) -> pd.DataFrame:
         + FGI_SST_WEIGHT * df["sst_score"]
     ).round(4)
 
-    df = df.drop(columns=["chl_norm", "sst_score"])
-    return df
-
-
-# expose tolerance constant for use in _compute_fgi
-FGI_TOLERANCE = FGI_SST_TOLERANCE
+    return df.drop(columns=["chl_norm", "sst_score"])
 
 
 def merge_all_sources(
@@ -109,80 +105,58 @@ def merge_all_sources(
     """
     Merge all source DataFrames into a unified fishing ground dataset.
 
-    Parameters
-    ----------
-    sst_df         : DataFrame with columns time, latitude, longitude, sst_celsius
-    chlorophyll_df : DataFrame with columns time, latitude, longitude, chlorophyll_mgm3
-    currents_df    : DataFrame with columns time, latitude, longitude, u_current_ms, v_current_ms, ssh_m
-    effort_df      : DataFrame with columns time, latitude, longitude, wpp_region, fishing_effort_hours, vessel_count
-    grid_resolution: float  spatial grid resolution in degrees
-
-    Returns
-    -------
-    pd.DataFrame with unified schema
+    Each source is independently aggregated to the same grid resolution,
+    then outer-joined on (month, lat_grid, lon_grid).
     """
     res = grid_resolution
     sources_used: list[str] = []
+    key = ["month", "lat_grid", "lon_grid"]
 
     # ---- SST ----
-    if sst_df is not None and not sst_df.empty:
-        sst = _snap_to_grid(_to_month(sst_df), res)
-        sst_agg = (
-            sst.groupby(["month", "lat_grid", "lon_grid"])["sst_celsius"]
-            .mean()
-            .reset_index()
-            .rename(columns={"sst_celsius": "sst_mean"})
-        )
+    if sst_df is not None and not sst_df.empty and "sst_celsius" in sst_df.columns:
+        sst_agg = _agg_to_grid(sst_df, ["sst_celsius"], "mean", res)
+        sst_agg = sst_agg.rename(columns={"sst_celsius": "sst_mean"})
         sst_agg["sst_mean"] = sst_agg["sst_mean"].round(3)
-        sources_used.append(sst_df["source"].iloc[0] if "source" in sst_df.columns else "unknown")
+        src = sst_df["source"].iloc[0] if "source" in sst_df.columns else "unknown"
+        if src not in sources_used:
+            sources_used.append(src)
     else:
-        sst_agg = pd.DataFrame(columns=["month", "lat_grid", "lon_grid", "sst_mean"])
+        sst_agg = pd.DataFrame(columns=key + ["sst_mean"])
 
     # ---- Chlorophyll ----
-    if chlorophyll_df is not None and not chlorophyll_df.empty:
-        chl = _snap_to_grid(_to_month(chlorophyll_df), res)
-        chl_agg = (
-            chl.groupby(["month", "lat_grid", "lon_grid"])["chlorophyll_mgm3"]
-            .mean()
-            .reset_index()
-            .rename(columns={"chlorophyll_mgm3": "chlorophyll_mean"})
-        )
+    if chlorophyll_df is not None and not chlorophyll_df.empty and "chlorophyll_mgm3" in chlorophyll_df.columns:
+        chl_agg = _agg_to_grid(chlorophyll_df, ["chlorophyll_mgm3"], "mean", res)
+        chl_agg = chl_agg.rename(columns={"chlorophyll_mgm3": "chlorophyll_mean"})
         chl_agg["chlorophyll_mean"] = chl_agg["chlorophyll_mean"].round(4)
         src = chlorophyll_df["source"].iloc[0] if "source" in chlorophyll_df.columns else "unknown"
         if src not in sources_used:
             sources_used.append(src)
     else:
-        chl_agg = pd.DataFrame(columns=["month", "lat_grid", "lon_grid", "chlorophyll_mean"])
+        chl_agg = pd.DataFrame(columns=key + ["chlorophyll_mean"])
 
-    # ---- Currents ----
-    if currents_df is not None and not currents_df.empty:
-        cur = _snap_to_grid(_to_month(currents_df), res)
-        cur_agg = (
-            cur.groupby(["month", "lat_grid", "lon_grid"])[
-                ["u_current_ms", "v_current_ms", "ssh_m"]
-            ]
-            .mean()
-            .reset_index()
-            .rename(columns={
-                "u_current_ms": "u_current_mean",
-                "v_current_ms": "v_current_mean",
-                "ssh_m": "ssh_mean",
-            })
-        )
+    # ---- Currents + SSH ----
+    cur_cols = [c for c in ["u_current_ms", "v_current_ms", "ssh_m"]
+                if currents_df is not None and c in currents_df.columns]
+    if currents_df is not None and not currents_df.empty and cur_cols:
+        cur_agg = _agg_to_grid(currents_df, cur_cols, "mean", res)
+        rename_map = {"u_current_ms": "u_current_mean",
+                      "v_current_ms": "v_current_mean",
+                      "ssh_m": "ssh_mean"}
+        cur_agg = cur_agg.rename(columns={k: v for k, v in rename_map.items() if k in cur_agg.columns})
         for col in ["u_current_mean", "v_current_mean", "ssh_mean"]:
-            cur_agg[col] = cur_agg[col].round(4)
+            if col in cur_agg.columns:
+                cur_agg[col] = cur_agg[col].round(4)
         src = currents_df["source"].iloc[0] if "source" in currents_df.columns else "unknown"
         if src not in sources_used:
             sources_used.append(src)
     else:
-        cur_agg = pd.DataFrame(columns=["month", "lat_grid", "lon_grid",
-                                         "u_current_mean", "v_current_mean", "ssh_mean"])
+        cur_agg = pd.DataFrame(columns=key + ["u_current_mean", "v_current_mean", "ssh_mean"])
 
     # ---- Fishing Effort ----
-    if effort_df is not None and not effort_df.empty:
+    if effort_df is not None and not effort_df.empty and "fishing_effort_hours" in effort_df.columns:
         eff = _snap_to_grid(_to_month(effort_df), res)
         eff_agg = (
-            eff.groupby(["month", "lat_grid", "lon_grid"])
+            eff.groupby(key)
             .agg(
                 fishing_effort_hours=("fishing_effort_hours", "sum"),
                 vessel_count=("vessel_count", "sum"),
@@ -195,36 +169,44 @@ def merge_all_sources(
         if src not in sources_used:
             sources_used.append(src)
     else:
-        eff_agg = pd.DataFrame(columns=["month", "lat_grid", "lon_grid",
-                                          "fishing_effort_hours", "vessel_count", "wpp_region"])
+        eff_agg = pd.DataFrame(columns=key + ["fishing_effort_hours", "vessel_count", "wpp_region"])
 
-    # ---- Merge all on month + grid ----
-    key = ["month", "lat_grid", "lon_grid"]
-
-    # Start from whichever has data
-    frames = [f for f in [sst_agg, chl_agg, cur_agg, eff_agg] if not f.empty]
-    if not frames:
+    # ---- Build master grid from GFW effort (most complete spatial coverage) ----
+    # Use effort grid as base, then left-join oceanographic data
+    frames_with_data = [(f, len(f)) for f in [eff_agg, sst_agg, chl_agg, cur_agg] if not f.empty]
+    if not frames_with_data:
         logger.warning("No data to merge.")
         return pd.DataFrame()
 
-    merged = frames[0]
-    for frame in frames[1:]:
-        merged = merged.merge(frame, on=key, how="outer")
+    # Sort by coverage — use largest as base
+    frames_with_data.sort(key=lambda x: x[1], reverse=True)
+    merged = frames_with_data[0][0]
 
-    # Fill missing numeric columns
+    for frame, _ in frames_with_data[1:]:
+        if frame.empty:
+            continue
+        # Get columns to merge (exclude key cols already in merged)
+        new_cols = [c for c in frame.columns if c not in key or c in key]
+        merged = merged.merge(frame, on=key, how="left")
+
+    # Fill missing columns
     for col in ["sst_mean", "chlorophyll_mean", "u_current_mean",
-                "v_current_mean", "ssh_mean", "fishing_effort_hours", "vessel_count"]:
+                "v_current_mean", "ssh_mean", "fishing_effort_hours",
+                "vessel_count", "wpp_region"]:
         if col not in merged.columns:
             merged[col] = np.nan
 
-    # Assign WPP if not already present
-    if "wpp_region" not in merged.columns or merged["wpp_region"].isna().all():
-        merged = _assign_wpp(merged)
+    # Assign WPP where missing
+    missing_wpp = merged["wpp_region"].isna() | (merged["wpp_region"] == "")
+    if missing_wpp.any():
+        sub = merged[missing_wpp].copy()
+        sub = _assign_wpp(sub)
+        merged.loc[missing_wpp, "wpp_region"] = sub["wpp_region"].values
 
-    # Compute Fishing Ground Index
+    # Compute FGI
     merged = _compute_fgi(merged)
 
-    # Add metadata
+    # Metadata
     merged["data_sources"] = "|".join(sources_used) if sources_used else "unknown"
 
     # Final column order
@@ -240,6 +222,12 @@ def merge_all_sources(
             merged[col] = np.nan
 
     merged = merged[final_cols].sort_values(["month", "lat_grid", "lon_grid"]).reset_index(drop=True)
+
+    # Report fill rates
+    fill_pct = (merged.notnull().sum() / len(merged) * 100).round(1)
+    logger.info("Fill rates: SST=%.1f%% CHL=%.1f%% SSH=%.1f%% Effort=%.1f%%",
+                fill_pct.get("sst_mean", 0), fill_pct.get("chlorophyll_mean", 0),
+                fill_pct.get("ssh_mean", 0), fill_pct.get("fishing_effort_hours", 0))
     logger.info("Merged dataset: %d rows, %d columns.", len(merged), len(merged.columns))
     return merged
 

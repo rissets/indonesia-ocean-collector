@@ -48,8 +48,10 @@ DEFAULT_RAW_DIR:    str = "data/raw"
 # ERDDAP endpoints
 # ---------------------------------------------------------------------------
 ERDDAP_BASE_URL = "https://coastwatch.pfeg.noaa.gov/erddap/griddap"
-ERDDAP_SST_DATASET   = "erdMH1sstd8day_R2022SQNotMasked"
-ERDDAP_CHL_DATASET   = "erdMH1chla8day_R2022NRT"
+ERDDAP_SST_DATASET        = "erdMH1sstdmday_R2022SQNotMasked"  # MODIS monthly SST, gap-free
+ERDDAP_SST_HADISST        = "erdHadISST"                        # HadISST monthly, 1°, gap-free fallback
+ERDDAP_CHL_DATASET        = "erdMH1chlamday_R2022NRT"           # MODIS monthly chlorophyll
+ERDDAP_SSH_DATASET        = "nesdisSSH1day"                     # NESDIS SSH + geostrophic currents
 
 # ---------------------------------------------------------------------------
 # Global Fishing Watch

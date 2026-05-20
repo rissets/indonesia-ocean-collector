@@ -129,13 +129,17 @@ def run(args: argparse.Namespace) -> Path:
     if "erddap" in args.sources:
         logger.info("[1/3] Collecting from NOAA ERDDAP ...")
         sst_erddap = erddap_collector.collect_sst(
-            args.start, args.end, args.max_records, raw_dir=args.raw_dir
+            args.start, args.end, args.max_records, raw_dir=args.raw_dir, stride=2
         )
         chl_erddap = erddap_collector.collect_chlorophyll(
-            args.start, args.end, args.max_records, raw_dir=args.raw_dir
+            args.start, args.end, args.max_records, raw_dir=args.raw_dir, stride=2
+        )
+        ssh_erddap = erddap_collector.collect_ssh_currents(
+            args.start, args.end, args.max_records, raw_dir=args.raw_dir, stride=1
         )
         sst_df = sst_erddap if not sst_erddap.empty else sst_df
         chl_df = chl_erddap if not chl_erddap.empty else chl_df
+        cur_df = ssh_erddap if not ssh_erddap.empty else cur_df
 
     # ------------------------------------------------------------------ CMEMS
     if "cmems" in args.sources:
