@@ -6,3 +6,10 @@ copernicusmarine>=1.3.0
 xarray>=2023.6.0
 netCDF4>=1.6.4
 scipy>=1.11.0
+
+# Google Sheets export (sheets/export_to_sheets.py)
+# Option A — Composio (recommended, handles OAuth automatically)
+composio-core>=0.7.0
+# Option B — gspread service-account fallback
+# gspread>=6.0.0
+# google-auth>=2.0.0

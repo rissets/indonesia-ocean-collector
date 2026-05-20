@@ -17,6 +17,11 @@ build/
 # Data (raw downloads — too large for git)
 data/raw/
 data/processed/
+data/sheets/
+
+# Google credentials — never commit
+credentials.json
+service_account.json
 
 # NetCDF files
 *.nc
