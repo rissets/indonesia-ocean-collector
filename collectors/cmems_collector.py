@@ -23,8 +23,8 @@ from config import (
     DEFAULT_MAX_RECORDS,
     DEFAULT_RAW_DIR,
     INDONESIA_BBOX,
-    WPP_REGIONS,
 )
+from db.wpp import assign_wpp as _assign_wpp_db
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +32,14 @@ SOURCE_NAME = "CMEMS"
 MOCK_SOURCE = "CMEMS_MOCK"
 
 
+def _assign_wpp(df: pd.DataFrame) -> pd.DataFrame:
+    return _assign_wpp_db(df)
+
+
 def _has_credentials() -> bool:
     return bool(
-        os.getenv("COPERNICUSMARINE_SERVICE_USERNAME")
-        and os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD")
+        (os.getenv("COPERNICUSMARINE_SERVICE_USERNAME") or os.getenv("CMEMS_CLIENT_ID"))
+        and (os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD") or os.getenv("CMEMS_CLIENT_SECRET"))
     )
 
 
@@ -253,6 +257,7 @@ def collect_all(
         df = _generate_mock_grid(start_date, end_date, bbox, max_records)
 
     _save_raw(df, "cmems_all", start_date, end_date, raw_dir)
+    df = _assign_wpp(df)
     logger.info("CMEMS all: %d records (source=%s).", len(df), df["source"].iloc[0] if len(df) else "none")
     return df
 
@@ -273,6 +278,14 @@ def _collect_cmems_real(
     except ImportError as exc:
         logger.error("Missing dependency: %s. Run: pip install copernicusmarine xarray", exc)
         return pd.DataFrame()
+
+    # Support both standard and alternate env var names
+    username = os.getenv("COPERNICUSMARINE_SERVICE_USERNAME") or os.getenv("CMEMS_CLIENT_ID")
+    password = os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD") or os.getenv("CMEMS_CLIENT_SECRET")
+    if username:
+        os.environ["COPERNICUSMARINE_SERVICE_USERNAME"] = username
+    if password:
+        os.environ["COPERNICUSMARINE_SERVICE_PASSWORD"] = password
 
     with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
         tmp_path = tmp.name
