@@ -21,14 +21,14 @@ INSERT INTO master_oceanography (
     tanggal, latitude, longitude,
     suhu_permukaan, sst, ssh, klorofil,
     arus_laut_u, arus_laut_v, kecepatan_arus,
-    tinggi_gelombang, periode_gelombang,
+    tinggi_gelombang,
     kecepatan_angin, arah_angin, radiasi_matahari,
     cuaca, sumber_data
 ) VALUES (
     %(tanggal)s, %(latitude)s, %(longitude)s,
     %(suhu_permukaan)s, %(sst)s, %(ssh)s, %(klorofil)s,
     %(arus_laut_u)s, %(arus_laut_v)s, %(kecepatan_arus)s,
-    %(tinggi_gelombang)s, %(periode_gelombang)s,
+    %(tinggi_gelombang)s,
     %(kecepatan_angin)s, %(arah_angin)s, %(radiasi_matahari)s,
     %(cuaca)s, %(sumber_data)s
 )
@@ -42,7 +42,6 @@ DO UPDATE SET
     arus_laut_v      = COALESCE(EXCLUDED.arus_laut_v,      master_oceanography.arus_laut_v),
     kecepatan_arus   = COALESCE(EXCLUDED.kecepatan_arus,   master_oceanography.kecepatan_arus),
     tinggi_gelombang = COALESCE(EXCLUDED.tinggi_gelombang, master_oceanography.tinggi_gelombang),
-    periode_gelombang= COALESCE(EXCLUDED.periode_gelombang,master_oceanography.periode_gelombang),
     kecepatan_angin  = COALESCE(EXCLUDED.kecepatan_angin,  master_oceanography.kecepatan_angin),
     arah_angin       = COALESCE(EXCLUDED.arah_angin,       master_oceanography.arah_angin),
     radiasi_matahari = COALESCE(EXCLUDED.radiasi_matahari, master_oceanography.radiasi_matahari),
@@ -98,7 +97,6 @@ def _row_to_params(row: dict) -> dict:
         "arus_laut_v":      v,
         "kecepatan_arus":   g("kecepatan_arus") or speed,
         "tinggi_gelombang": g("tinggi_gelombang"),
-        "periode_gelombang":g("periode_gelombang"),
         "kecepatan_angin":  g("kecepatan_angin"),
         "arah_angin":       g("arah_angin"),
         "radiasi_matahari": g("radiasi_matahari"),

@@ -244,6 +244,7 @@ def collect_all(
     bbox = bbox or INDONESIA_BBOX
 
     if _has_credentials():
+        _configure_credentials()
         df = _collect_cmems_real(
             dataset_id="cmems_mod_glo_phy_my_0.083deg_P1D-m",
             variables=["thetao", "uo", "vo", "zos"],
@@ -252,20 +253,27 @@ def collect_all(
             bbox=bbox,
             max_records=max_records,
         )
-        df = df.rename(columns={
-            "thetao": "sst_celsius",
-            "uo": "u_current_ms",
-            "vo": "v_current_ms",
-            "zos": "ssh_m",
-        })
-        # Merge chlorophyll separately (different dataset)
-        chl = collect_chlorophyll(start_date, end_date, max_records, bbox, raw_dir)
-        df = df.merge(
-            chl[["time", "latitude", "longitude", "chlorophyll_mgm3"]],
-            on=["time", "latitude", "longitude"],
-            how="left",
-        )
-        df["source"] = SOURCE_NAME
+        if df.empty:
+            logger.warning("CMEMS real download returned empty — falling back to mock data.")
+            df = _generate_mock_grid(start_date, end_date, bbox, max_records)
+        else:
+            df = df.rename(columns={
+                "thetao": "sst_celsius",
+                "uo": "u_current_ms",
+                "vo": "v_current_ms",
+                "zos": "ssh_m",
+            })
+            # Merge chlorophyll separately (different dataset)
+            chl = collect_chlorophyll(start_date, end_date, max_records, bbox, raw_dir)
+            if not chl.empty and "chlorophyll_mgm3" in chl.columns:
+                df = df.merge(
+                    chl[["time", "latitude", "longitude", "chlorophyll_mgm3"]],
+                    on=["time", "latitude", "longitude"],
+                    how="left",
+                )
+            else:
+                df["chlorophyll_mgm3"] = None
+            df["source"] = SOURCE_NAME
     else:
         df = _generate_mock_grid(start_date, end_date, bbox, max_records)
 
@@ -291,7 +299,8 @@ def _collect_cmems_real(
         logger.error("Missing dependency: %s. Run: pip install copernicusmarine xarray", exc)
         return pd.DataFrame()
 
-    _configure_credentials()
+    username = os.getenv("COPERNICUSMARINE_SERVICE_USERNAME") or os.getenv("CMEMS_CLIENT_ID")
+    password = os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD") or os.getenv("CMEMS_CLIENT_SECRET")
 
     with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
         tmp_path = tmp.name
@@ -309,7 +318,8 @@ def _collect_cmems_real(
             minimum_depth=0,
             maximum_depth=1,
             output_filename=tmp_path,
-            force_download=True,
+            username=username,
+            password=password,
         )
         ds = xr.open_dataset(tmp_path)
         df = ds.to_dataframe().reset_index()

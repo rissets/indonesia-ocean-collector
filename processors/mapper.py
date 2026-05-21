@@ -192,15 +192,18 @@ def merge_all_sources(
     # Fill missing columns
     for col in ["sst_mean", "chlorophyll_mean", "u_current_mean",
                 "v_current_mean", "ssh_mean", "fishing_effort_hours",
-                "vessel_count", "wpp_region"]:
+                "vessel_count"]:
         if col not in merged.columns:
             merged[col] = np.nan
+    if "wpp_region" not in merged.columns:
+        merged["wpp_region"] = None
 
     # Assign WPP where missing
     missing_wpp = merged["wpp_region"].isna() | (merged["wpp_region"] == "")
     if missing_wpp.any():
         sub = merged[missing_wpp].copy()
         sub = _assign_wpp(sub)
+        merged["wpp_region"] = merged["wpp_region"].astype(object)
         merged.loc[missing_wpp, "wpp_region"] = sub["wpp_region"].values
 
     # Compute FGI
