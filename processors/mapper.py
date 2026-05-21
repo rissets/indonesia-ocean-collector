@@ -27,8 +27,8 @@ from config import (
     FGI_OPTIMAL_SST,
     FGI_SST_TOLERANCE,
     FGI_SST_WEIGHT,
-    WPP_REGIONS,
 )
+from db.wpp import assign_wpp as _assign_wpp_db
 
 logger = logging.getLogger(__name__)
 FGI_TOLERANCE = FGI_SST_TOLERANCE
@@ -51,18 +51,8 @@ def _to_month(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _assign_wpp(df: pd.DataFrame) -> pd.DataFrame:
-    """Assign WPP region name based on lat_grid/lon_grid."""
-    df = df.copy()
-
-    def _find_wpp(lat: float, lon: float) -> str:
-        for name, bbox in WPP_REGIONS.items():
-            if bbox["min_lat"] <= lat <= bbox["max_lat"] and \
-               bbox["min_lon"] <= lon <= bbox["max_lon"]:
-                return name
-        return "OUTSIDE_WPP"
-
-    df["wpp_region"] = df.apply(lambda r: _find_wpp(r["lat_grid"], r["lon_grid"]), axis=1)
-    return df
+    """Assign WPP region name based on lat_grid/lon_grid using master_wpp table."""
+    return _assign_wpp_db(df, lat_col="lat_grid", lon_col="lon_grid")
 
 
 def _agg_to_grid(df: pd.DataFrame, value_cols: list[str],

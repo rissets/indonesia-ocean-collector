@@ -23,8 +23,8 @@ from config import (
     DEFAULT_MAX_RECORDS,
     DEFAULT_RAW_DIR,
     INDONESIA_BBOX,
-    WPP_REGIONS,
 )
+from db.wpp import assign_wpp as _assign_wpp_db
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +33,7 @@ MOCK_SOURCE = "CMEMS_MOCK"
 
 
 def _assign_wpp(df: pd.DataFrame) -> pd.DataFrame:
-    """Add wpp_region column based on latitude/longitude."""
-    def _find(lat: float, lon: float) -> str:
-        for name, bbox in WPP_REGIONS.items():
-            if bbox["min_lat"] <= lat <= bbox["max_lat"] and bbox["min_lon"] <= lon <= bbox["max_lon"]:
-                return name
-        return "OUTSIDE_WPP"
-    df = df.copy()
-    df["wpp_region"] = df.apply(lambda r: _find(r["latitude"], r["longitude"]), axis=1)
-    return df
+    return _assign_wpp_db(df)
 
 
 def _has_credentials() -> bool:
