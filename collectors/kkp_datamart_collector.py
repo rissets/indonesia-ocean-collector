@@ -218,10 +218,11 @@ def _safe_str(val: Any, maxlen: int = 150) -> Optional[str]:
 
 def _map_kapal_basic(raw: dict) -> dict:
     """Map search-kapal-bkp record to master_kapal columns; use '-' sentinel for required text fields."""
+    tx = _safe_str(raw.get("transmitter_no") or raw.get("no_transmitter") or raw.get("nomor_transmitter"), 100)
     return {
         "nama_kapal":          _safe_str(raw.get("nama_kapal"), 150) or "-",
         "nomor_bkp":           _safe_str(raw.get("nomor_buku_kapal") or raw.get("nomor_bkp") or raw.get("no_bkp"), 50),
-        "no_transmitter":      _safe_str(raw.get("transmitter_no") or raw.get("no_transmitter") or raw.get("nomor_transmitter"), 100) or "-",
+        "no_transmitter":      tx or None,  # NULL avoids unique constraint collision for vessels without transmitter
         "tanda_selar":         "-",
         "ukuran_kapal":        0.0,
         "pemilik":             "-",
@@ -245,7 +246,7 @@ def _map_kapal_detail(detail: dict) -> dict:
     return {
         "nama_kapal":          _safe_str(detail.get("nama_kapal"), 150) or "-",
         "nomor_bkp":           _safe_str(detail.get("no_bkp") or detail.get("nomor_bkp") or detail.get("nomor_buku_kapal"), 50),
-        "no_transmitter":      _safe_str(detail.get("nomor_transmitter") or detail.get("transmitter_no"), 100) or "-",
+        "no_transmitter":      _safe_str(detail.get("nomor_transmitter") or detail.get("transmitter_no"), 100) or None,
         "tanda_selar":         _safe_str(detail.get("tanda_selar"), 100) or "-",
         "ukuran_kapal":        _safe_decimal(detail.get("ukuran_gt")) or 0.0,
         "pemilik":             _safe_str(detail.get("pemilik_kapal"), 150) or "-",
@@ -289,27 +290,37 @@ def truncate_tables(conn) -> None:
 
 def upsert_master_kapal(conn, kapal_rows: list[dict]) -> int:
     """
-    Upsert into master_kapal in a single executemany batch. Conflict key: nomor_bkp.
-    Uses COALESCE so enriched detail fields don't overwrite with NULL
-    when called from the basic search pass.
+    Upsert into master_kapal. Uses a two-pass approach to handle the dual unique
+    constraints on nomor_bkp and no_transmitter:
+      Pass 1 — insert/update all fields except no_transmitter (conflict on nomor_bkp)
+      Pass 2 — update no_transmitter one row at a time, clearing any stale owner first
     """
     if not kapal_rows:
         return 0
-    sql = """
+
+    # Deduplicate by nomor_bkp within the batch (keep last occurrence)
+    seen_bkp: dict[str, dict] = {}
+    for row in kapal_rows:
+        bkp = row.get("nomor_bkp")
+        if bkp:
+            seen_bkp[bkp] = row
+    kapal_rows = list(seen_bkp.values()) if seen_bkp else kapal_rows
+
+    # Pass 1: upsert all fields except no_transmitter to avoid unique constraint issues
+    sql_pass1 = """
         INSERT INTO master_kapal (
-            nama_kapal, nomor_bkp, no_transmitter,
+            nama_kapal, nomor_bkp,
             tanda_selar, ukuran_kapal, pemilik, alat_tangkap,
             kekuatan_mesin, merek_mesin, wilayah_tangkap, pelabuhan_pangkalan,
             aktif
         ) VALUES (
-            %(nama_kapal)s, %(nomor_bkp)s, %(no_transmitter)s,
+            %(nama_kapal)s, %(nomor_bkp)s,
             %(tanda_selar)s, %(ukuran_kapal)s, %(pemilik)s, %(alat_tangkap)s,
             %(kekuatan_mesin)s, %(merek_mesin)s, %(wilayah_tangkap)s, %(pelabuhan_pangkalan)s,
             %(aktif)s
         )
         ON CONFLICT (nomor_bkp) DO UPDATE SET
             nama_kapal          = EXCLUDED.nama_kapal,
-            no_transmitter      = COALESCE(EXCLUDED.no_transmitter,      master_kapal.no_transmitter),
             tanda_selar         = COALESCE(EXCLUDED.tanda_selar,         master_kapal.tanda_selar),
             ukuran_kapal        = COALESCE(EXCLUDED.ukuran_kapal,        master_kapal.ukuran_kapal),
             pemilik             = COALESCE(EXCLUDED.pemilik,             master_kapal.pemilik),
@@ -322,8 +333,31 @@ def upsert_master_kapal(conn, kapal_rows: list[dict]) -> int:
             updated_at          = NOW()
     """
     with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(cur, sql, kapal_rows, page_size=len(kapal_rows))
+        psycopg2.extras.execute_batch(cur, sql_pass1, kapal_rows, page_size=500)
     conn.commit()
+
+    # Pass 2: update no_transmitter for rows that have one.
+    # Clear any stale owner first, then assign to the correct nomor_bkp.
+    rows_with_tx = [r for r in kapal_rows if r.get("no_transmitter") and r.get("nomor_bkp")]
+    if rows_with_tx:
+        with conn.cursor() as cur:
+            for row in rows_with_tx:
+                tx  = row["no_transmitter"]
+                bkp = row["nomor_bkp"]
+                # Clear tx from any other row that currently holds it
+                cur.execute(
+                    "UPDATE master_kapal SET no_transmitter = NULL "
+                    "WHERE no_transmitter = %s AND nomor_bkp != %s",
+                    (tx, bkp),
+                )
+                # Assign tx to the correct row
+                cur.execute(
+                    "UPDATE master_kapal SET no_transmitter = %s, updated_at = NOW() "
+                    "WHERE nomor_bkp = %s AND (no_transmitter IS NULL OR no_transmitter != %s)",
+                    (tx, bkp, tx),
+                )
+        conn.commit()
+
     inserted = len(kapal_rows)
     logger.info("master_kapal batch upsert: %d rows committed", inserted)
     return inserted
@@ -355,7 +389,12 @@ def upsert_vessel_tracking_batch(conn, tracking_rows: list[dict]) -> int:
 # Main collection entry points
 # ---------------------------------------------------------------------------
 
-def collect_master_kapal(conn, enrich_detail: bool = True) -> tuple[int, list[dict]]:
+def collect_master_kapal(
+    conn,
+    enrich_detail: bool = True,
+    max_vessels: Optional[int] = None,
+    enrich_batch_size: int = 100,
+) -> tuple[int, list[dict]]:
     """
     Phase 1: fetch all kapal from search endpoint → upsert basic rows.
     Phase 2 (optional): fetch data-kapal detail per vessel → enrich master_kapal.
@@ -381,23 +420,38 @@ def collect_master_kapal(conn, enrich_detail: bool = True) -> tuple[int, list[di
         return upserted, raw_list
 
     # Phase 2: enrich with full detail from data-kapal endpoint
-    logger.info("Enriching master_kapal with data-kapal detail ...")
-    enriched = 0
-    for i, kapal in enumerate(raw_list, 1):
-        transmitter_no = str(kapal.get("transmitter_no") or "").strip()
-        if not transmitter_no:
-            continue
+    # Only enrich vessels that have a transmitter_no (required for the detail API)
+    vessels_to_enrich = [k for k in raw_list if str(k.get("transmitter_no") or "").strip()]
+    if max_vessels:
+        vessels_to_enrich = vessels_to_enrich[:max_vessels]
 
+    logger.info("Enriching %d vessels with data-kapal detail ...", len(vessels_to_enrich))
+    enriched = 0
+    pending_detail: list[dict] = []
+
+    for i, kapal in enumerate(vessels_to_enrich, 1):
+        transmitter_no = str(kapal.get("transmitter_no") or "").strip()
         detail = fetch_kapal_detail(transmitter_no)
         if detail:
             detail_row = _map_kapal_detail(detail)
             if detail_row.get("nomor_bkp"):
-                n = upsert_master_kapal(conn, [detail_row])
-                enriched += n
+                pending_detail.append(detail_row)
+
+        # Flush batch every enrich_batch_size vessels
+        if len(pending_detail) >= enrich_batch_size:
+            n = upsert_master_kapal(conn, pending_detail)
+            enriched += n
+            pending_detail = []
+            logger.info("  Enriched %d/%d vessels (batch committed)", i, len(vessels_to_enrich))
 
         if i % 100 == 0:
-            logger.info("  Enriched %d/%d vessels", i, len(raw_list))
+            logger.info("  Progress: %d/%d vessels enriched", i, len(vessels_to_enrich))
         time.sleep(RATE_LIMIT_DELAY)
+
+    # Flush remainder
+    if pending_detail:
+        n = upsert_master_kapal(conn, pending_detail)
+        enriched += n
 
     logger.info("master_kapal enrichment: %d vessels updated", enriched)
     return upserted, raw_list
@@ -488,7 +542,9 @@ def run(
     try:
         if truncate:
             truncate_tables(conn)
-        kapal_upserted, kapal_list = collect_master_kapal(conn, enrich_detail=enrich_detail)
+        kapal_upserted, kapal_list = collect_master_kapal(
+            conn, enrich_detail=enrich_detail, max_vessels=max_vessels
+        )
         tracking_inserted = collect_vessel_tracking(
             conn, kapal_list,
             interval=tracking_interval,
