@@ -35,7 +35,7 @@ REQUEST_TIMEOUT = 30
 RATE_LIMIT_DELAY = 0.3  # seconds between per-vessel requests
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0
-DEFAULT_BATCH_SIZE = 10000  # commit every N tracking rows
+DEFAULT_BATCH_SIZE = 1000  # commit every N tracking rows
 
 
 # ---------------------------------------------------------------------------
@@ -217,19 +217,19 @@ def _safe_str(val: Any, maxlen: int = 150) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _map_kapal_basic(raw: dict) -> dict:
-    """Map search-kapal-bkp record (3 fields only) to master_kapal columns."""
+    """Map search-kapal-bkp record to master_kapal columns; use '-' sentinel for required text fields."""
     return {
-        "nama_kapal":          _safe_str(raw.get("nama_kapal"), 150),
+        "nama_kapal":          _safe_str(raw.get("nama_kapal"), 150) or "-",
         "nomor_bkp":           _safe_str(raw.get("nomor_buku_kapal") or raw.get("nomor_bkp") or raw.get("no_bkp"), 50),
-        "no_transmitter":      _safe_str(raw.get("transmitter_no") or raw.get("no_transmitter") or raw.get("nomor_transmitter"), 100),
-        "tanda_selar":         None,
-        "ukuran_kapal":        None,
-        "pemilik":             None,
-        "alat_tangkap":        None,
-        "kekuatan_mesin":      None,
-        "merek_mesin":         None,
-        "wilayah_tangkap":     None,
-        "pelabuhan_pangkalan": None,
+        "no_transmitter":      _safe_str(raw.get("transmitter_no") or raw.get("no_transmitter") or raw.get("nomor_transmitter"), 100) or "-",
+        "tanda_selar":         "-",
+        "ukuran_kapal":        0.0,
+        "pemilik":             "-",
+        "alat_tangkap":        "-",
+        "kekuatan_mesin":      0.0,
+        "merek_mesin":         "-",
+        "wilayah_tangkap":     "-",
+        "pelabuhan_pangkalan": "-",
         "aktif":               True,
     }
 
@@ -237,46 +237,39 @@ def _map_kapal_basic(raw: dict) -> dict:
 def _map_kapal_detail(detail: dict) -> dict:
     """
     Map data-kapal response to master_kapal columns.
-
-    API fields available:
-      no_bkp, nama_kapal, tanda_selar, ukuran_gt, nomor_transmitter,
-      pemilik_kapal, alat_tangkap / jenis_alat_tangkap, kekuatan_mesin,
-      merk_mesin, nama_wpp, nama_pelabuhan_pangkalan, ping_time
+    Uses '-' sentinel and 0.0 for numeric fields so no column is left empty.
     """
-    # Combine alat_tangkap code + jenis name for a readable value
-    alat = _safe_str(detail.get("jenis_alat_tangkap") or detail.get("alat_tangkap"), 100)
-
-    # wilayah_tangkap: use nama_wpp (comma-separated WPP names)
-    wilayah = _safe_str(detail.get("nama_wpp"), 100)
+    alat = _safe_str(detail.get("jenis_alat_tangkap") or detail.get("alat_tangkap"), 100) or "-"
+    wilayah = _safe_str(detail.get("nama_wpp"), 100) or "-"
 
     return {
-        "nama_kapal":          _safe_str(detail.get("nama_kapal"), 150),
+        "nama_kapal":          _safe_str(detail.get("nama_kapal"), 150) or "-",
         "nomor_bkp":           _safe_str(detail.get("no_bkp") or detail.get("nomor_bkp") or detail.get("nomor_buku_kapal"), 50),
-        "no_transmitter":      _safe_str(detail.get("nomor_transmitter") or detail.get("transmitter_no"), 100),
-        "tanda_selar":         _safe_str(detail.get("tanda_selar"), 100),
-        "ukuran_kapal":        _safe_decimal(detail.get("ukuran_gt")),
-        "pemilik":             _safe_str(detail.get("pemilik_kapal"), 150),
+        "no_transmitter":      _safe_str(detail.get("nomor_transmitter") or detail.get("transmitter_no"), 100) or "-",
+        "tanda_selar":         _safe_str(detail.get("tanda_selar"), 100) or "-",
+        "ukuran_kapal":        _safe_decimal(detail.get("ukuran_gt")) or 0.0,
+        "pemilik":             _safe_str(detail.get("pemilik_kapal"), 150) or "-",
         "alat_tangkap":        alat,
-        "kekuatan_mesin":      _safe_decimal(detail.get("kekuatan_mesin")),
-        "merek_mesin":         _safe_str(detail.get("merk_mesin"), 100),
+        "kekuatan_mesin":      _safe_decimal(detail.get("kekuatan_mesin")) or 0.0,
+        "merek_mesin":         _safe_str(detail.get("merk_mesin"), 100) or "-",
         "wilayah_tangkap":     wilayah,
-        "pelabuhan_pangkalan": _safe_str(detail.get("nama_pelabuhan_pangkalan"), 150),
+        "pelabuhan_pangkalan": _safe_str(detail.get("nama_pelabuhan_pangkalan"), 150) or "-",
         "aktif":               True,
     }
 
 
 def _map_tracking_row(raw: dict, nomor_bkp: str, nama_kapal: str, transmitter_no: str) -> dict:
     return {
-        "nama_kapal":     _safe_str(nama_kapal, 100),
-        "nomor_bkp":      _safe_str(nomor_bkp, 50),
-        "transmitter_no": _safe_str(transmitter_no, 100),
-        "mmsi":           None,
+        "nama_kapal":     _safe_str(nama_kapal, 100) or "-",
+        "nomor_bkp":      _safe_str(nomor_bkp, 50) or "-",
+        "transmitter_no": _safe_str(transmitter_no, 100) or "-",
+        "mmsi":           _safe_str(raw.get("mmsi"), 50) or "-",
         "latitude":       _safe_decimal(raw.get("latitude")),
         "longitude":      _safe_decimal(raw.get("longitude")),
-        "direction":      _safe_decimal(raw.get("direction") or raw.get("heading")),
-        "speed":          _safe_decimal(raw.get("speed")),
+        "direction":      _safe_decimal(raw.get("direction") or raw.get("heading")) or 0.0,
+        "speed":          _safe_decimal(raw.get("speed")) or 0.0,
         "timestamp":      raw.get("ping_time") or raw.get("timestamp") or raw.get("waktu"),
-        "status_kapal":   None,
+        "status_kapal":   _safe_str(raw.get("status_kapal"), 50) or "-",
         "source":         "KKP_VMS",
     }
 
