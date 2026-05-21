@@ -1,21 +1,17 @@
 """
 Airflow DAG: Backfill master_oceanography dari 2021-01-01 sampai hari ini.
 
-Strategi:
-- Satu TaskGroup per bulan (2021-01 s/d bulan berjalan)
-- Setiap bulan: collect ERDDAP + CMEMS + Open-Meteo, upsert ke master_oceanography
-- Batch size 1000 records per source per bulan
+Strategi continuous batching:
+- 3 task paralel: satu per source (ERDDAP, CMEMS, Open-Meteo)
+- Setiap task loop internal: collect batch → upsert → langsung batch berikutnya
+- Tidak ada jeda antar batch — selesai satu langsung mulai berikutnya
+- Batch size: 1000 records per 30-hari window
 - Idempoten: upsert ON CONFLICT, aman dijalankan ulang
-- Paralel: max_active_tasks=4 agar tidak membebani API
-
-Jalankan sekali untuk backfill historis. Setelah selesai, dag_oceanography_sync.py
-mengambil alih untuk sinkronisasi harian.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,7 +20,6 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 
-# Tambahkan root repo ke sys.path agar bisa import collectors/db
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -36,91 +31,104 @@ BATCH_SIZE = 1000
 RAW_DIR = str(_REPO_ROOT / "data" / "raw")
 
 
-def _month_list(start: str, end: str) -> list[tuple[str, str]]:
-    """Return list of (month_start, month_end) tuples from start to end inclusive."""
-    months = []
-    cur = datetime.strptime(start, "%Y-%m-%d").replace(day=1)
-    end_dt = datetime.strptime(end, "%Y-%m-%d").replace(day=1)
+def _date_batches(start: str, end: str, days_per_batch: int = 30) -> list[tuple[str, str]]:
+    """Split date range into consecutive windows of `days_per_batch` days."""
+    batches = []
+    cur = datetime.strptime(start, "%Y-%m-%d")
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
     while cur <= end_dt:
-        # last day of month
-        if cur.month == 12:
-            last = cur.replace(day=31)
-        else:
-            last = (cur.replace(month=cur.month + 1, day=1) - timedelta(days=1))
-        months.append((cur.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")))
-        if cur.month == 12:
-            cur = cur.replace(year=cur.year + 1, month=1)
-        else:
-            cur = cur.replace(month=cur.month + 1)
-    return months
+        batch_end = min(cur + timedelta(days=days_per_batch - 1), end_dt)
+        batches.append((cur.strftime("%Y-%m-%d"), batch_end.strftime("%Y-%m-%d")))
+        cur = batch_end + timedelta(days=1)
+    return batches
 
 
-def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> dict:
-    """Collect all sources for one month and upsert into master_oceanography."""
+def _backfill_erddap(**context) -> dict:
+    """Continuous batch backfill from NOAA ERDDAP (SST + chlorophyll + SSH/currents)."""
     from dotenv import load_dotenv
     load_dotenv(_REPO_ROOT / ".env")
 
-    from collectors import erddap_collector, cmems_collector
-    from collectors.openmeteo_collector import collect as openmeteo_collect
+    from collectors import erddap_collector
     from db.writer import upsert_dataframe
 
-    results = {}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    batches = _date_batches(BACKFILL_START, today, days_per_batch=30)
+    total = 0
 
-    # ---- ERDDAP ----
-    try:
-        sst_df = erddap_collector.collect_sst(
-            month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, stride=2
-        )
-        chl_df = erddap_collector.collect_chlorophyll(
-            month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, stride=2
-        )
-        ssh_df = erddap_collector.collect_ssh_currents(
-            month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, stride=1
-        )
+    for batch_start, batch_end in batches:
+        try:
+            sst_df = erddap_collector.collect_sst(
+                batch_start, batch_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, stride=2
+            )
+            chl_df = erddap_collector.collect_chlorophyll(
+                batch_start, batch_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, stride=2
+            )
+            ssh_df = erddap_collector.collect_ssh_currents(
+                batch_start, batch_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, stride=1
+            )
 
-        import pandas as pd
-        import math
+            if sst_df.empty:
+                logger.warning("ERDDAP SST empty for %s–%s, skipping", batch_start, batch_end)
+                continue
 
-        # Normalise ERDDAP SST
-        if not sst_df.empty:
-            sst_df = sst_df.rename(columns={"time": "tanggal", "sst_celsius": "sst"})
-            sst_df["suhu_permukaan"] = sst_df["sst"]
-            sst_df["sumber_data"] = "NOAA_ERDDAP"
-            # Merge chlorophyll into SST frame where possible
+            df = sst_df.rename(columns={"time": "tanggal", "sst_celsius": "sst"})
+            df["suhu_permukaan"] = df["sst"]
+            df["sumber_data"] = "NOAA_ERDDAP"
+
             if not chl_df.empty:
-                chl_df = chl_df.rename(columns={"time": "tanggal", "chlorophyll_mgm3": "klorofil"})
-                sst_df = sst_df.merge(
-                    chl_df[["tanggal", "latitude", "longitude", "klorofil"]],
+                chl = chl_df.rename(columns={"time": "tanggal", "chlorophyll_mgm3": "klorofil"})
+                df = df.merge(
+                    chl[["tanggal", "latitude", "longitude", "klorofil"]],
                     on=["tanggal", "latitude", "longitude"],
                     how="left",
                 )
-            # Merge SSH/currents
+
             if not ssh_df.empty:
-                ssh_df = ssh_df.rename(columns={
+                ssh = ssh_df.rename(columns={
                     "time": "tanggal",
                     "ssh_m": "ssh",
                     "u_current_ms": "arus_laut_u",
                     "v_current_ms": "arus_laut_v",
                 })
-                sst_df = sst_df.merge(
-                    ssh_df[["tanggal", "latitude", "longitude", "ssh", "arus_laut_u", "arus_laut_v"]],
+                df = df.merge(
+                    ssh[["tanggal", "latitude", "longitude", "ssh", "arus_laut_u", "arus_laut_v"]],
                     on=["tanggal", "latitude", "longitude"],
                     how="left",
                 )
-            n = upsert_dataframe(sst_df, "NOAA_ERDDAP")
-            results["erddap"] = n
-            logger.info("ERDDAP %s–%s: %d rows upserted", month_start, month_end, n)
-    except Exception as exc:
-        logger.error("ERDDAP failed for %s–%s: %s", month_start, month_end, exc)
-        results["erddap_error"] = str(exc)
 
-    # ---- CMEMS ----
-    try:
-        cmems_df = cmems_collector.collect_all(
-            month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR
-        )
-        if not cmems_df.empty:
-            cmems_df = cmems_df.rename(columns={
+            n = upsert_dataframe(df, "NOAA_ERDDAP")
+            total += n
+            logger.info("ERDDAP batch %s–%s: %d rows upserted (total=%d)", batch_start, batch_end, n, total)
+
+        except Exception as exc:
+            logger.error("ERDDAP batch %s–%s failed: %s", batch_start, batch_end, exc)
+
+    logger.info("ERDDAP backfill complete: %d total rows upserted", total)
+    return {"source": "NOAA_ERDDAP", "total_rows": total}
+
+
+def _backfill_cmems(**context) -> dict:
+    """Continuous batch backfill from Copernicus Marine (CMEMS)."""
+    from dotenv import load_dotenv
+    load_dotenv(_REPO_ROOT / ".env")
+
+    from collectors import cmems_collector
+    from db.writer import upsert_dataframe
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    batches = _date_batches(BACKFILL_START, today, days_per_batch=30)
+    total = 0
+
+    for batch_start, batch_end in batches:
+        try:
+            df = cmems_collector.collect_all(
+                batch_start, batch_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR
+            )
+            if df.empty:
+                logger.warning("CMEMS empty for %s–%s, skipping", batch_start, batch_end)
+                continue
+
+            df = df.rename(columns={
                 "time": "tanggal",
                 "sst_celsius": "sst",
                 "chlorophyll_mgm3": "klorofil",
@@ -129,69 +137,88 @@ def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> di
                 "v_current_ms": "arus_laut_v",
                 "salinity_psu": "salinitas",
             })
-            cmems_df["suhu_permukaan"] = cmems_df.get("sst", None)
-            cmems_df["sumber_data"] = "CMEMS"
-            n = upsert_dataframe(cmems_df, "CMEMS")
-            results["cmems"] = n
-            logger.info("CMEMS %s–%s: %d rows upserted", month_start, month_end, n)
-    except Exception as exc:
-        logger.error("CMEMS failed for %s–%s: %s", month_start, month_end, exc)
-        results["cmems_error"] = str(exc)
+            df["suhu_permukaan"] = df.get("sst", None)
+            df["sumber_data"] = "CMEMS"
 
-    # ---- Open-Meteo ----
-    try:
-        om_df = openmeteo_collect(
-            month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR
-        )
-        if not om_df.empty:
-            n = upsert_dataframe(om_df, "Open-Meteo")
-            results["openmeteo"] = n
-            logger.info("Open-Meteo %s–%s: %d rows upserted", month_start, month_end, n)
-    except Exception as exc:
-        logger.error("Open-Meteo failed for %s–%s: %s", month_start, month_end, exc)
-        results["openmeteo_error"] = str(exc)
+            n = upsert_dataframe(df, "CMEMS")
+            total += n
+            logger.info("CMEMS batch %s–%s: %d rows upserted (total=%d)", batch_start, batch_end, n, total)
 
-    return results
+        except Exception as exc:
+            logger.error("CMEMS batch %s–%s failed: %s", batch_start, batch_end, exc)
+
+    logger.info("CMEMS backfill complete: %d total rows upserted", total)
+    return {"source": "CMEMS", "total_rows": total}
 
 
-# ---------------------------------------------------------------------------
-# Build DAG — one task per month
-# ---------------------------------------------------------------------------
+def _backfill_openmeteo(**context) -> dict:
+    """Continuous batch backfill from Open-Meteo (waves + wind + radiation)."""
+    from dotenv import load_dotenv
+    load_dotenv(_REPO_ROOT / ".env")
 
-today = datetime.utcnow().strftime("%Y-%m-%d")
-months = _month_list(BACKFILL_START, today)
+    from collectors.openmeteo_collector import collect as openmeteo_collect
+    from db.writer import upsert_dataframe
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # Open-Meteo free tier: max 92-day window per request — use 30-day batches
+    batches = _date_batches(BACKFILL_START, today, days_per_batch=30)
+    total = 0
+
+    for batch_start, batch_end in batches:
+        try:
+            df = openmeteo_collect(
+                batch_start, batch_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR
+            )
+            if df.empty:
+                logger.warning("Open-Meteo empty for %s–%s, skipping", batch_start, batch_end)
+                continue
+
+            n = upsert_dataframe(df, "Open-Meteo")
+            total += n
+            logger.info("Open-Meteo batch %s–%s: %d rows upserted (total=%d)", batch_start, batch_end, n, total)
+
+        except Exception as exc:
+            logger.error("Open-Meteo batch %s–%s failed: %s", batch_start, batch_end, exc)
+
+    logger.info("Open-Meteo backfill complete: %d total rows upserted", total)
+    return {"source": "Open-Meteo", "total_rows": total}
+
 
 default_args = {
     "owner": "data-engineer",
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
-    "execution_timeout": timedelta(hours=2),
+    "execution_timeout": timedelta(hours=12),
 }
 
 with DAG(
     dag_id="oceanography_backfill",
-    description="Backfill master_oceanography dari 2021-01-01 sampai hari ini (batch 1000/bulan)",
+    description="Backfill master_oceanography 2021-01-01 s/d hari ini — continuous batching per source",
     default_args=default_args,
     start_date=days_ago(1),
-    schedule_interval=None,  # triggered manually — bukan recurring
+    schedule_interval=None,  # triggered manually
     catchup=False,
-    max_active_tasks=4,
+    max_active_tasks=3,  # 3 sources run in parallel
     tags=["oceanography", "backfill", "maritime"],
 ) as dag:
 
-    prev_task = None
-    for month_start, month_end in months:
-        task_id = f"collect_{month_start[:7].replace('-', '_')}"
+    erddap_task = PythonOperator(
+        task_id="backfill_erddap",
+        python_callable=_backfill_erddap,
+        doc_md="Continuous batch backfill NOAA ERDDAP → master_oceanography",
+    )
 
-        task = PythonOperator(
-            task_id=task_id,
-            python_callable=_collect_and_upsert_month,
-            op_kwargs={"month_start": month_start, "month_end": month_end},
-            doc_md=f"Collect & upsert {month_start} → {month_end} (batch={BATCH_SIZE})",
-        )
+    cmems_task = PythonOperator(
+        task_id="backfill_cmems",
+        python_callable=_backfill_cmems,
+        doc_md="Continuous batch backfill CMEMS → master_oceanography",
+    )
 
-        # Serial execution: setiap bulan menunggu bulan sebelumnya selesai
-        # agar tidak membebani API secara bersamaan
-        if prev_task is not None:
-            prev_task >> task
-        prev_task = task
+    openmeteo_task = PythonOperator(
+        task_id="backfill_openmeteo",
+        python_callable=_backfill_openmeteo,
+        doc_md="Continuous batch backfill Open-Meteo → master_oceanography",
+    )
+
+    # All 3 sources run in parallel — no dependency between them
+    [erddap_task, cmems_task, openmeteo_task]

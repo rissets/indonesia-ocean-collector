@@ -33,7 +33,11 @@ SOURCE_NAME = "Open-Meteo"
 
 _MARINE_URL   = "https://marine-api.open-meteo.com/v1/marine"
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_ARCHIVE_URL  = "https://archive-api.open-meteo.com/v1/archive"
 _REQUEST_TIMEOUT = 30
+
+# Forecast API only covers ~16 days ahead; use archive for anything older
+_ARCHIVE_CUTOFF_DAYS = 7
 
 
 def _build_grid(bbox: dict[str, float], resolution: float) -> list[tuple[float, float]]:
@@ -84,6 +88,10 @@ def _fetch_marine(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
 
 
 def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
+    # Historical dates (older than _ARCHIVE_CUTOFF_DAYS) must use the archive API
+    cutoff = (pd.Timestamp.now("UTC") - pd.Timedelta(days=_ARCHIVE_CUTOFF_DAYS)).strftime("%Y-%m-%d")
+    url = _ARCHIVE_URL if end <= cutoff else _FORECAST_URL
+
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -94,11 +102,11 @@ def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> pd.DataFram
         "wind_speed_unit": "ms",
     }
     try:
-        resp = requests.get(_FORECAST_URL, params=params, timeout=_REQUEST_TIMEOUT)
+        resp = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        logger.debug("Forecast API failed lat=%.2f lon=%.2f: %s", lat, lon, exc)
+        logger.debug("Forecast/archive API failed lat=%.2f lon=%.2f: %s", lat, lon, exc)
         return pd.DataFrame()
 
     daily = data.get("daily", {})
