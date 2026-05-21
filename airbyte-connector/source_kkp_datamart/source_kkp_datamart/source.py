@@ -2,15 +2,17 @@
 Airbyte Source: KKP Datamart
 
 Streams:
-  - master_kapal          : vessel registry (search-kapal-bkp + data-kapal detail)
+  - master_kapal          : full vessel registry (search-kapal-bkp + data-kapal detail)
+                            Use OVERWRITE sync mode — emits all records fresh every run.
   - master_vessel_tracking: GPS pings per vessel (data-kapal-lokasi-interval)
+                            Use OVERWRITE sync mode — emits all current pings fresh every run.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Generator, Iterable, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Iterable, List, Mapping, Optional, Tuple
 
 import requests
 from airbyte_cdk.sources import AbstractSource
@@ -50,6 +52,20 @@ def _get(url: str, token: str, params: Optional[dict] = None) -> Optional[Any]:
     return None
 
 
+def _fetch_kapal_list(token: str) -> list:
+    """Fetch full vessel list from search-kapal-bkp endpoint."""
+    url = f"{KKP_BASE}/kapal/search-kapal-bkp"
+    params = {"page": 1, "limit": 100000, "sort_by": "nama_kapal", "sort_order": "asc"}
+    data = _get(url, token, params)
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Value helpers
 # ---------------------------------------------------------------------------
@@ -76,8 +92,11 @@ def _float(val: Any) -> Optional[float]:
 
 class MasterKapal(Stream):
     """
-    Fetches all vessels from KKP search-kapal-bkp, then enriches each with
+    Fetches ALL vessels from KKP search-kapal-bkp, then enriches each with
     data-kapal detail. Emits one record per vessel.
+
+    Use OVERWRITE sync mode in Airbyte — destination table is truncated and
+    fully reloaded on every sync run. No upsert / incremental logic.
     """
 
     primary_key = "nomor_bkp"
@@ -117,21 +136,12 @@ class MasterKapal(Stream):
         stream_slice: Optional[Mapping[str, Any]] = None,
         stream_state: Optional[Mapping[str, Any]] = None,
     ) -> Iterable[Mapping[str, Any]]:
-        # Fetch full vessel list
-        url = f"{KKP_BASE}/kapal/search-kapal-bkp"
-        params = {"page": 1, "limit": 100000, "sort_by": "nama_kapal", "sort_order": "asc"}
-        data = _get(url, self._token, params)
-        if data is None:
-            logger.error("Failed to fetch kapal list from KKP")
+        raw_list = _fetch_kapal_list(self._token)
+        if not raw_list:
+            logger.error("KKP master_kapal: no records returned from search-kapal-bkp")
             return
 
-        raw_list: list = []
-        if isinstance(data, list):
-            raw_list = data
-        elif isinstance(data, dict) and "data" in data:
-            raw_list = data["data"]
-
-        logger.info("KKP: fetched %d kapal records", len(raw_list))
+        logger.info("KKP master_kapal: fetched %d vessels", len(raw_list))
 
         for i, raw in enumerate(raw_list, 1):
             nomor_bkp = _str(
@@ -160,8 +170,11 @@ class MasterKapal(Stream):
             }
 
             if self._enrich_detail and transmitter_no:
-                detail_url = f"{KKP_BASE}/kapal/data-kapal"
-                detail_data = _get(detail_url, self._token, {"transmitter_no": transmitter_no})
+                detail_data = _get(
+                    f"{KKP_BASE}/kapal/data-kapal",
+                    self._token,
+                    {"transmitter_no": transmitter_no},
+                )
                 detail: Optional[dict] = None
                 if isinstance(detail_data, dict):
                     if "data" in detail_data and isinstance(detail_data["data"], dict):
@@ -202,9 +215,12 @@ class MasterVesselTracking(Stream):
     """
     Fetches GPS tracking pings for every vessel from data-kapal-lokasi-interval.
     Emits one record per ping point.
+
+    Use OVERWRITE sync mode in Airbyte — destination table is truncated and
+    fully reloaded on every sync run.
     """
 
-    primary_key = None  # no natural PK; DB uses ON CONFLICT DO NOTHING
+    primary_key = None
 
     def __init__(self, token: str, interval: int = 30):
         self._token = token
@@ -233,18 +249,6 @@ class MasterVesselTracking(Stream):
             },
         }
 
-    def _fetch_kapal_list(self) -> list:
-        url = f"{KKP_BASE}/kapal/search-kapal-bkp"
-        params = {"page": 1, "limit": 100000, "sort_by": "nama_kapal", "sort_order": "asc"}
-        data = _get(url, self._token, params)
-        if data is None:
-            return []
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-        return []
-
     def read_records(
         self,
         sync_mode: SyncMode,
@@ -252,9 +256,9 @@ class MasterVesselTracking(Stream):
         stream_slice: Optional[Mapping[str, Any]] = None,
         stream_state: Optional[Mapping[str, Any]] = None,
     ) -> Iterable[Mapping[str, Any]]:
-        kapal_list = self._fetch_kapal_list()
+        kapal_list = _fetch_kapal_list(self._token)
         if not kapal_list:
-            logger.error("No kapal list available for tracking collection")
+            logger.error("KKP tracking: no vessels found — cannot collect tracking data")
             return
 
         logger.info("KKP tracking: iterating %d vessels (interval=%d min)", len(kapal_list), self._interval)
@@ -266,13 +270,16 @@ class MasterVesselTracking(Stream):
             if not nomor_bkp:
                 continue
 
-            nama_kapal     = _str(kapal.get("nama_kapal"), 100)
+            nama_kapal = _str(kapal.get("nama_kapal"), 100)
             transmitter_no = _str(
                 kapal.get("transmitter_no") or kapal.get("no_transmitter") or kapal.get("nomor_transmitter"), 100
             )
 
-            url = f"{KKP_BASE}/kapal/data-kapal-lokasi-interval"
-            data = _get(url, self._token, {"nomor_bkp": nomor_bkp, "interval": self._interval})
+            data = _get(
+                f"{KKP_BASE}/kapal/data-kapal-lokasi-interval",
+                self._token,
+                {"nomor_bkp": nomor_bkp, "interval": self._interval},
+            )
 
             if data is None:
                 time.sleep(RATE_LIMIT_DELAY)
@@ -303,7 +310,7 @@ class MasterVesselTracking(Stream):
                     continue
                 yield {
                     "nama_kapal":     nama_kapal,
-                    "nomor_bkp":      _str(pt.get("nomor_bkp", nomor_bkp), 50),
+                    "nomor_bkp":      _str(pt.get("nomor_bkp") or nomor_bkp, 50),
                     "transmitter_no": transmitter_no,
                     "mmsi":           None,
                     "latitude":       lat,
@@ -331,9 +338,11 @@ class SourceKkpDatamart(AbstractSource):
         token = config.get("kkp_datamart_token", "")
         if not token:
             return False, "kkp_datamart_token is required"
-        url = f"{KKP_BASE}/kapal/search-kapal-bkp"
-        params = {"page": 1, "limit": 1, "sort_by": "nama_kapal", "sort_order": "asc"}
-        data = _get(url, token, params)
+        data = _get(
+            f"{KKP_BASE}/kapal/search-kapal-bkp",
+            token,
+            {"page": 1, "limit": 1, "sort_by": "nama_kapal", "sort_order": "asc"},
+        )
         if data is None:
             return False, "Failed to connect to KKP Datamart API — check token and network"
         return True, None
