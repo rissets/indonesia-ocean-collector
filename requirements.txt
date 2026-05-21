@@ -6,3 +6,6 @@ copernicusmarine>=1.3.0
 xarray>=2023.6.0
 netCDF4>=1.6.4
 scipy>=1.11.0
+psycopg2-binary>=2.9.9
+# Airflow (install separately via: pip install apache-airflow>=2.8.0)
+# apache-airflow>=2.8.0
