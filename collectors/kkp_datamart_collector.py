@@ -332,9 +332,21 @@ def upsert_master_kapal(conn, kapal_rows: list[dict]) -> int:
 
 
 def upsert_vessel_tracking_batch(conn, tracking_rows: list[dict]) -> int:
-    """Batch-insert tracking rows; skip duplicates via ON CONFLICT DO NOTHING."""
+    """
+    Batch-insert tracking rows.
+    Deduplicates in-memory on (nomor_bkp, timestamp) before inserting so we
+    don't rely on a DB unique constraint that may not exist.
+    """
     if not tracking_rows:
         return 0
+
+    # Deduplicate: keep last occurrence of each (nomor_bkp, timestamp) pair
+    seen: dict[tuple, dict] = {}
+    for row in tracking_rows:
+        key = (row.get("nomor_bkp"), row.get("timestamp"))
+        seen[key] = row
+    deduped = list(seen.values())
+
     sql = """
         INSERT INTO master_vessel_tracking (
             nama_kapal, nomor_bkp, transmitter_no,
@@ -349,7 +361,7 @@ def upsert_vessel_tracking_batch(conn, tracking_rows: list[dict]) -> int:
     """
     inserted = 0
     with conn.cursor() as cur:
-        for row in tracking_rows:
+        for row in deduped:
             try:
                 cur.execute(sql, row)
                 inserted += 1
@@ -517,6 +529,7 @@ def run(
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
     logging.basicConfig(
         level=logging.INFO,
@@ -525,18 +538,26 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="KKP Datamart Collector")
-    parser.add_argument("--interval",       type=int,  default=30,   help="Tracking interval in minutes (default: 30)")
-    parser.add_argument("--max-vessels",    type=int,  default=None, help="Limit tracking to first N vessels")
-    parser.add_argument("--batch-size",     type=int,  default=DEFAULT_BATCH_SIZE, help=f"Commit every N tracking rows (default: {DEFAULT_BATCH_SIZE})")
-    parser.add_argument("--no-enrich",      action="store_true",     help="Skip data-kapal detail enrichment (faster, fewer columns)")
-    parser.add_argument("--log-level",      default="INFO",          help="Logging level (default: INFO)")
+    parser.add_argument("--interval",    type=int,  default=30,   help="Tracking interval in minutes (default: 30)")
+    parser.add_argument("--max-vessels", type=int,  default=None, help="Limit tracking to first N vessels")
+    parser.add_argument("--batch-size",  type=int,  default=DEFAULT_BATCH_SIZE, help=f"Commit every N tracking rows (default: {DEFAULT_BATCH_SIZE})")
+    parser.add_argument("--no-enrich",   action="store_true",     help="Skip data-kapal detail enrichment (faster, fewer columns)")
+    parser.add_argument("--log-level",   default="INFO",          help="Logging level (default: INFO)")
     args = parser.parse_args()
 
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
 
-    run(
-        tracking_interval=args.interval,
-        max_vessels=args.max_vessels,
-        enrich_detail=not args.no_enrich,
-        batch_size=args.batch_size,
-    )
+    try:
+        result = run(
+            tracking_interval=args.interval,
+            max_vessels=args.max_vessels,
+            enrich_detail=not args.no_enrich,
+            batch_size=args.batch_size,
+        )
+        # Exit non-zero if nothing was collected at all (signals Airflow to retry)
+        if result["kapal_upserted"] == 0:
+            logger.error("No kapal rows upserted — possible API failure. Exiting with error.")
+            sys.exit(1)
+    except Exception as exc:
+        logger.exception("Collector failed: %s", exc)
+        sys.exit(1)
