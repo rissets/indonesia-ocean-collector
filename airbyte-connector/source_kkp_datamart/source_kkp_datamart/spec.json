@@ -1,0 +1,35 @@
+{
+  "documentationUrl": "https://github.com/rissets/indonesia-ocean-collector",
+  "connectionSpecification": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "KKP Datamart Source Spec",
+    "type": "object",
+    "required": ["kkp_datamart_token"],
+    "additionalProperties": false,
+    "properties": {
+      "kkp_datamart_token": {
+        "type": "string",
+        "title": "KKP Datamart JWT Token",
+        "description": "Bearer JWT token for insight.kkp.go.id/datamart API. Store in .env as KKP_DATAMART_TOKEN.",
+        "airbyte_secret": true,
+        "order": 0
+      },
+      "enrich_detail": {
+        "type": "boolean",
+        "title": "Enrich vessel detail",
+        "description": "Fetch data-kapal detail per vessel to fill all master_kapal columns (tanda_selar, pemilik, alat_tangkap, etc.). Slower but more complete.",
+        "default": true,
+        "order": 1
+      },
+      "tracking_interval": {
+        "type": "integer",
+        "title": "Tracking interval (minutes)",
+        "description": "Interval in minutes for vessel location data from data-kapal-lokasi-interval endpoint.",
+        "default": 30,
+        "minimum": 5,
+        "maximum": 1440,
+        "order": 2
+      }
+    }
+  }
+}

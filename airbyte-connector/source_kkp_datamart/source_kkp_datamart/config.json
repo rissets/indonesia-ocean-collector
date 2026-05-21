@@ -1,0 +1,5 @@
+{
+  "kkp_datamart_token": "YOUR_KKP_JWT_TOKEN",
+  "enrich_detail": true,
+  "tracking_interval": 30
+}
