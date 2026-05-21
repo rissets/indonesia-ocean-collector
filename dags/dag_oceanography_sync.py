@@ -1,8 +1,11 @@
 """
 Airflow DAG: Sinkronisasi harian master_oceanography — setiap hari jam 01:00 UTC.
 
-Mengambil data kemarin dari semua sumber (ERDDAP, CMEMS, Open-Meteo) dan
-upsert ke master_oceanography. Idempoten — aman dijalankan ulang.
+Mengambil data kemarin dari semua sumber (ERDDAP, CMEMS, Open-Meteo),
+filter ke WPP only, dan upsert ke master_oceanography.
+Semua kolom diisi: ssh, klorofil, arus, gelombang, angin, radiasi,
+cuaca, kedalaman_laut, pasang_surut, periode_gelombang, jarak_padang.
+Idempoten — aman dijalankan ulang.
 """
 
 from __future__ import annotations
@@ -26,16 +29,43 @@ BATCH_SIZE = 1000
 RAW_DIR = str(_REPO_ROOT / "data" / "raw")
 
 
+def _compute_jarak_padang(df):
+    """Distance (km) to nearest seagrass hotspot via Haversine."""
+    import numpy as np
+
+    SEAGRASS_HOTSPOTS = [
+        (-8.72, 115.17), (-5.15, 119.45), (-0.90, 134.90), (-8.50, 140.40),
+        (-3.80, 128.20), (1.00, 104.00),  (-2.50, 107.50), (-7.00, 112.70),
+        (-8.30, 122.50), (0.50, 127.50),  (-4.00, 122.60), (-1.50, 136.00),
+        (-6.10, 106.80), (3.80, 108.20),  (-9.50, 119.50), (-10.20, 123.60),
+    ]
+    hotspots = np.array(SEAGRASS_HOTSPOTS)
+    lats = df["latitude"].values
+    lons = df["longitude"].values
+    R = 6371.0
+    min_dists = []
+    for lat, lon in zip(lats, lons):
+        dlat = np.radians(hotspots[:, 0] - lat)
+        dlon = np.radians(hotspots[:, 1] - lon)
+        a = (np.sin(dlat / 2) ** 2
+             + np.cos(np.radians(lat)) * np.cos(np.radians(hotspots[:, 0])) * np.sin(dlon / 2) ** 2)
+        dists = 2 * R * np.arcsin(np.sqrt(a))
+        min_dists.append(round(float(dists.min()), 3))
+    df = df.copy()
+    df["jarak_padang"] = min_dists
+    return df
+
+
 def _sync_yesterday(**context) -> dict:
-    """Collect yesterday's data from all sources and upsert into master_oceanography."""
+    """Collect yesterday's data from all sources, filter WPP, upsert into master_oceanography."""
     from dotenv import load_dotenv
     load_dotenv(_REPO_ROOT / ".env")
 
     from collectors import erddap_collector, cmems_collector
     from collectors.openmeteo_collector import collect as openmeteo_collect
+    from collectors.wpp_filter import filter_wpp
     from db.writer import upsert_dataframe
 
-    # Use Airflow logical date if available, otherwise yesterday UTC
     execution_date = context.get("logical_date") or context.get("execution_date")
     if execution_date:
         target_date = execution_date.strftime("%Y-%m-%d")
@@ -81,6 +111,9 @@ def _sync_yesterday(**context) -> dict:
                     on=["tanggal", "latitude", "longitude"],
                     how="left",
                 )
+
+            sst_df = filter_wpp(sst_df)
+            sst_df = _compute_jarak_padang(sst_df)
             n = upsert_dataframe(sst_df, "NOAA_ERDDAP")
             results["erddap_rows"] = n
     except Exception as exc:
@@ -100,9 +133,12 @@ def _sync_yesterday(**context) -> dict:
                 "ssh_m": "ssh",
                 "u_current_ms": "arus_laut_u",
                 "v_current_ms": "arus_laut_v",
+                "salinity_psu": "salinitas",
             })
             cmems_df["suhu_permukaan"] = cmems_df.get("sst", None)
             cmems_df["sumber_data"] = "CMEMS"
+            cmems_df = filter_wpp(cmems_df)
+            cmems_df = _compute_jarak_padang(cmems_df)
             n = upsert_dataframe(cmems_df, "CMEMS")
             results["cmems_rows"] = n
     except Exception as exc:
@@ -112,9 +148,10 @@ def _sync_yesterday(**context) -> dict:
     # ---- Open-Meteo ----
     try:
         om_df = openmeteo_collect(
-            target_date, target_date, max_records=BATCH_SIZE, raw_dir=RAW_DIR
+            target_date, target_date, max_records=BATCH_SIZE, raw_dir=RAW_DIR, wpp_only=True
         )
         if not om_df.empty:
+            om_df = _compute_jarak_padang(om_df)
             n = upsert_dataframe(om_df, "Open-Meteo")
             results["openmeteo_rows"] = n
     except Exception as exc:
@@ -135,10 +172,10 @@ default_args = {
 
 with DAG(
     dag_id="oceanography_sync",
-    description="Sinkronisasi harian master_oceanography — setiap hari jam 01:00 UTC",
+    description="Sinkronisasi harian master_oceanography — setiap hari jam 01:00 UTC, WPP only",
     default_args=default_args,
     start_date=days_ago(1),
-    schedule_interval="0 1 * * *",  # setiap hari jam 01:00 UTC
+    schedule_interval="0 1 * * *",
     catchup=False,
     max_active_runs=1,
     tags=["oceanography", "sync", "maritime"],
@@ -148,7 +185,9 @@ with DAG(
         task_id="sync_yesterday",
         python_callable=_sync_yesterday,
         doc_md=(
-            "Ambil data kemarin dari ERDDAP + CMEMS + Open-Meteo "
-            "dan upsert ke master_oceanography (batch=1000)."
+            "Ambil data kemarin dari ERDDAP + CMEMS + Open-Meteo, "
+            "filter WPP only, upsert ke master_oceanography (batch=1000). "
+            "Kolom terisi: ssh, klorofil, arus, gelombang, angin, radiasi, "
+            "cuaca, kedalaman_laut, pasang_surut, periode_gelombang, jarak_padang."
         ),
     )

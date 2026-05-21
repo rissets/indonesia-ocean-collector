@@ -2,20 +2,19 @@
 Airflow DAG: Backfill master_oceanography dari 2021-01-01 sampai hari ini.
 
 Strategi:
-- Satu TaskGroup per bulan (2021-01 s/d bulan berjalan)
-- Setiap bulan: collect ERDDAP + CMEMS + Open-Meteo, upsert ke master_oceanography
+- Task pertama: hapus semua data di luar WPP dari master_oceanography
+- Satu task per bulan (2021-01 s/d bulan berjalan), serial
+- Setiap bulan: collect ERDDAP + CMEMS + Open-Meteo, filter WPP, upsert
 - Batch size 1000 records per source per bulan
 - Idempoten: upsert ON CONFLICT, aman dijalankan ulang
-- Paralel: max_active_tasks=4 agar tidak membebani API
-
-Jalankan sekali untuk backfill historis. Setelah selesai, dag_oceanography_sync.py
-mengambil alih untuk sinkronisasi harian.
+- Semua kolom diisi: ssh, klorofil, arus, gelombang, angin, radiasi,
+  cuaca, kedalaman_laut, pasang_surut, periode_gelombang, jarak_padang
 """
 
 from __future__ import annotations
 
 import logging
-import os
+import math
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,7 +23,6 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 
-# Tambahkan root repo ke sys.path agar bisa import collectors/db
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -37,12 +35,10 @@ RAW_DIR = str(_REPO_ROOT / "data" / "raw")
 
 
 def _month_list(start: str, end: str) -> list[tuple[str, str]]:
-    """Return list of (month_start, month_end) tuples from start to end inclusive."""
     months = []
     cur = datetime.strptime(start, "%Y-%m-%d").replace(day=1)
     end_dt = datetime.strptime(end, "%Y-%m-%d").replace(day=1)
     while cur <= end_dt:
-        # last day of month
         if cur.month == 12:
             last = cur.replace(day=31)
         else:
@@ -55,13 +51,84 @@ def _month_list(start: str, end: str) -> list[tuple[str, str]]:
     return months
 
 
-def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> dict:
-    """Collect all sources for one month and upsert into master_oceanography."""
+def _compute_jarak_padang(df):
+    """
+    Compute jarak_padang: approximate distance (km) to nearest known seagrass
+    (padang lamun) area in Indonesian waters.
+
+    Uses a curated list of major seagrass hotspots. Distance computed via
+    Haversine formula. Returns the DataFrame with 'jarak_padang' column added.
+    """
+    import numpy as np
+
+    # Major seagrass (padang lamun) hotspots in Indonesia (lat, lon)
+    SEAGRASS_HOTSPOTS = [
+        (-8.72, 115.17),   # Bali
+        (-5.15, 119.45),   # Spermonde Archipelago, Sulawesi
+        (-0.90, 134.90),   # Teluk Cendrawasih, Papua
+        (-8.50, 140.40),   # Merauke, Papua
+        (-3.80, 128.20),   # Banda Sea
+        (1.00, 104.00),    # Riau Islands
+        (-2.50, 107.50),   # Bangka-Belitung
+        (-7.00, 112.70),   # East Java coast
+        (-8.30, 122.50),   # Flores
+        (0.50, 127.50),    # North Maluku
+        (-4.00, 122.60),   # Southeast Sulawesi
+        (-1.50, 136.00),   # Biak, Papua
+        (-6.10, 106.80),   # Jakarta Bay
+        (3.80, 108.20),    # Natuna Sea
+        (-9.50, 119.50),   # Sumba
+        (-10.20, 123.60),  # Timor
+    ]
+
+    hotspots = np.array(SEAGRASS_HOTSPOTS)
+    lats = df["latitude"].values
+    lons = df["longitude"].values
+
+    R = 6371.0  # Earth radius km
+    min_dists = []
+    for lat, lon in zip(lats, lons):
+        dlat = np.radians(hotspots[:, 0] - lat)
+        dlon = np.radians(hotspots[:, 1] - lon)
+        a = np.sin(dlat / 2) ** 2 + np.cos(np.radians(lat)) * np.cos(np.radians(hotspots[:, 0])) * np.sin(dlon / 2) ** 2
+        dists = 2 * R * np.arcsin(np.sqrt(a))
+        min_dists.append(round(float(dists.min()), 3))
+
+    df = df.copy()
+    df["jarak_padang"] = min_dists
+    return df
+
+
+def _delete_outside_wpp(**context) -> dict:
+    """Delete all rows from master_oceanography that fall outside WPP regions."""
     from dotenv import load_dotenv
     load_dotenv(_REPO_ROOT / ".env")
 
+    from collectors.wpp_filter import delete_outside_wpp_sql
+    from db.writer import _get_conn
+
+    sql = delete_outside_wpp_sql()
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                deleted = cur.rowcount
+        logger.info("Deleted %d rows outside WPP from master_oceanography.", deleted)
+        return {"deleted_outside_wpp": deleted}
+    finally:
+        conn.close()
+
+
+def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> dict:
+    """Collect all sources for one month, filter to WPP, upsert into master_oceanography."""
+    from dotenv import load_dotenv
+    load_dotenv(_REPO_ROOT / ".env")
+
+    import pandas as pd
     from collectors import erddap_collector, cmems_collector
     from collectors.openmeteo_collector import collect as openmeteo_collect
+    from collectors.wpp_filter import filter_wpp
     from db.writer import upsert_dataframe
 
     results = {}
@@ -78,15 +145,11 @@ def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> di
             month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, stride=1
         )
 
-        import pandas as pd
-        import math
-
-        # Normalise ERDDAP SST
         if not sst_df.empty:
             sst_df = sst_df.rename(columns={"time": "tanggal", "sst_celsius": "sst"})
             sst_df["suhu_permukaan"] = sst_df["sst"]
             sst_df["sumber_data"] = "NOAA_ERDDAP"
-            # Merge chlorophyll into SST frame where possible
+
             if not chl_df.empty:
                 chl_df = chl_df.rename(columns={"time": "tanggal", "chlorophyll_mgm3": "klorofil"})
                 sst_df = sst_df.merge(
@@ -94,7 +157,6 @@ def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> di
                     on=["tanggal", "latitude", "longitude"],
                     how="left",
                 )
-            # Merge SSH/currents
             if not ssh_df.empty:
                 ssh_df = ssh_df.rename(columns={
                     "time": "tanggal",
@@ -107,6 +169,9 @@ def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> di
                     on=["tanggal", "latitude", "longitude"],
                     how="left",
                 )
+
+            sst_df = filter_wpp(sst_df)
+            sst_df = _compute_jarak_padang(sst_df)
             n = upsert_dataframe(sst_df, "NOAA_ERDDAP")
             results["erddap"] = n
             logger.info("ERDDAP %s–%s: %d rows upserted", month_start, month_end, n)
@@ -131,6 +196,8 @@ def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> di
             })
             cmems_df["suhu_permukaan"] = cmems_df.get("sst", None)
             cmems_df["sumber_data"] = "CMEMS"
+            cmems_df = filter_wpp(cmems_df)
+            cmems_df = _compute_jarak_padang(cmems_df)
             n = upsert_dataframe(cmems_df, "CMEMS")
             results["cmems"] = n
             logger.info("CMEMS %s–%s: %d rows upserted", month_start, month_end, n)
@@ -141,9 +208,10 @@ def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> di
     # ---- Open-Meteo ----
     try:
         om_df = openmeteo_collect(
-            month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR
+            month_start, month_end, max_records=BATCH_SIZE, raw_dir=RAW_DIR, wpp_only=True
         )
         if not om_df.empty:
+            om_df = _compute_jarak_padang(om_df)
             n = upsert_dataframe(om_df, "Open-Meteo")
             results["openmeteo"] = n
             logger.info("Open-Meteo %s–%s: %d rows upserted", month_start, month_end, n)
@@ -155,7 +223,7 @@ def _collect_and_upsert_month(month_start: str, month_end: str, **context) -> di
 
 
 # ---------------------------------------------------------------------------
-# Build DAG — one task per month
+# Build DAG
 # ---------------------------------------------------------------------------
 
 today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -170,16 +238,22 @@ default_args = {
 
 with DAG(
     dag_id="oceanography_backfill",
-    description="Backfill master_oceanography dari 2021-01-01 sampai hari ini (batch 1000/bulan)",
+    description="Backfill master_oceanography 2021-01-01 s/d hari ini — semua kolom terisi, WPP only",
     default_args=default_args,
     start_date=days_ago(1),
-    schedule_interval=None,  # triggered manually — bukan recurring
+    schedule_interval=None,
     catchup=False,
     max_active_tasks=4,
     tags=["oceanography", "backfill", "maritime"],
 ) as dag:
 
-    prev_task = None
+    delete_task = PythonOperator(
+        task_id="delete_outside_wpp",
+        python_callable=_delete_outside_wpp,
+        doc_md="Hapus semua data di luar WPP dari master_oceanography sebelum backfill.",
+    )
+
+    prev_task = delete_task
     for month_start, month_end in months:
         task_id = f"collect_{month_start[:7].replace('-', '_')}"
 
@@ -187,11 +261,8 @@ with DAG(
             task_id=task_id,
             python_callable=_collect_and_upsert_month,
             op_kwargs={"month_start": month_start, "month_end": month_end},
-            doc_md=f"Collect & upsert {month_start} → {month_end} (batch={BATCH_SIZE})",
+            doc_md=f"Collect & upsert {month_start} → {month_end} (WPP only, batch={BATCH_SIZE})",
         )
 
-        # Serial execution: setiap bulan menunggu bulan sebelumnya selesai
-        # agar tidak membebani API secara bersamaan
-        if prev_task is not None:
-            prev_task >> task
+        prev_task >> task
         prev_task = task

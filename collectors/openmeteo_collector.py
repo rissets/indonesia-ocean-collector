@@ -1,12 +1,16 @@
 """
-Open-Meteo collector — wave and weather data for Indonesian waters.
+Open-Meteo collector — wave, weather, tidal, and depth data for Indonesian waters.
 
 Marine API  : https://marine-api.open-meteo.com/v1/marine
-  Variables : wave_height, wave_period
+  Variables : wave_height_max, wave_period_max, ocean_current_velocity_max,
+              sea_level_height_msl (pasang_surut)
 Forecast API: https://api.open-meteo.com/v1/forecast
-  Variables : wind_speed_10m, wind_direction_10m, shortwave_radiation
+  Variables : wind_speed_10m_max, wind_direction_10m_dominant,
+              shortwave_radiation_sum, weather_code (cuaca)
+Elevation API: https://api.open-meteo.com/v1/elevation
+  Used once per grid point to get kedalaman_laut (negative = below sea level)
 
-Grid sampled at DEFAULT_GRID_RESOLUTION (0.5°) over INDONESIA_BBOX.
+Grid sampled at DEFAULT_GRID_RESOLUTION (0.5°) over WPP regions only.
 No API key required.
 """
 
@@ -25,15 +29,38 @@ from config import (
     DEFAULT_MAX_RECORDS,
     DEFAULT_RAW_DIR,
     INDONESIA_BBOX,
+    WPP_REGIONS,
 )
 
 logger = logging.getLogger(__name__)
 
 SOURCE_NAME = "Open-Meteo"
 
-_MARINE_URL   = "https://marine-api.open-meteo.com/v1/marine"
-_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_MARINE_URL    = "https://marine-api.open-meteo.com/v1/marine"
+_FORECAST_URL  = "https://api.open-meteo.com/v1/forecast"
+_ELEV_URL      = "https://api.open-meteo.com/v1/elevation"
 _REQUEST_TIMEOUT = 30
+
+# WMO weather code → human-readable label (subset covering marine conditions)
+_WMO_CODES: dict[int, str] = {
+    0: "Cerah", 1: "Cerah Sebagian", 2: "Berawan Sebagian", 3: "Mendung",
+    45: "Berkabut", 48: "Berkabut Beku",
+    51: "Gerimis Ringan", 53: "Gerimis Sedang", 55: "Gerimis Lebat",
+    61: "Hujan Ringan", 63: "Hujan Sedang", 65: "Hujan Lebat",
+    71: "Salju Ringan", 73: "Salju Sedang", 75: "Salju Lebat",
+    80: "Hujan Lokal Ringan", 81: "Hujan Lokal Sedang", 82: "Hujan Lokal Lebat",
+    95: "Badai Petir", 96: "Badai Petir + Hujan Es Ringan",
+    99: "Badai Petir + Hujan Es Lebat",
+}
+
+
+def _wmo_to_label(code) -> Optional[str]:
+    if code is None:
+        return None
+    try:
+        return _WMO_CODES.get(int(code), f"Kode-{int(code)}")
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_grid(bbox: dict[str, float], resolution: float) -> list[tuple[float, float]]:
@@ -42,8 +69,16 @@ def _build_grid(bbox: dict[str, float], resolution: float) -> list[tuple[float, 
     return [(round(float(lat), 4), round(float(lon), 4)) for lat in lats for lon in lons]
 
 
+def _build_wpp_grid(resolution: float) -> list[tuple[float, float]]:
+    """Build grid covering only WPP regions (deduped)."""
+    points: set[tuple[float, float]] = set()
+    for bbox in WPP_REGIONS.values():
+        points.update(_build_grid(bbox, resolution))
+    return sorted(points)
+
+
 def _clamp_date_range(start_date: str, end_date: str) -> tuple[str, str]:
-    """Clamp to 92-day window (Open-Meteo free tier limit)."""
+    """Clamp to 92-day window (Open-Meteo free tier limit for forecast API)."""
     s = pd.Timestamp(start_date)
     e = pd.Timestamp(end_date)
     if (e - s).days > 92:
@@ -52,11 +87,42 @@ def _clamp_date_range(start_date: str, end_date: str) -> tuple[str, str]:
     return s.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")
 
 
+def _fetch_elevation_batch(points: list[tuple[float, float]]) -> dict[tuple[float, float], float]:
+    """
+    Fetch elevation for up to 100 points in one call.
+    Negative elevation = below sea level = ocean depth (abs value).
+    Returns dict of (lat, lon) -> depth_m (positive = depth below surface).
+    """
+    if not points:
+        return {}
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    try:
+        resp = requests.get(
+            _ELEV_URL,
+            params={"latitude": ",".join(str(x) for x in lats),
+                    "longitude": ",".join(str(x) for x in lons)},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        elevations = resp.json().get("elevation", [])
+        result = {}
+        for pt, elev in zip(points, elevations):
+            if elev is not None and elev < 0:
+                result[pt] = round(abs(float(elev)), 2)
+            else:
+                result[pt] = None
+        return result
+    except Exception as exc:
+        logger.debug("Elevation API failed: %s", exc)
+        return {}
+
+
 def _fetch_marine(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
     params = {
         "latitude": lat,
         "longitude": lon,
-        "daily": "wave_height_max,wave_period_max",
+        "daily": "wave_height_max,wave_period_max,sea_level_height_msl_max",
         "start_date": start,
         "end_date": end,
         "timezone": "UTC",
@@ -80,6 +146,7 @@ def _fetch_marine(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
         "longitude":         lon,
         "tinggi_gelombang":  daily.get("wave_height_max"),
         "periode_gelombang": daily.get("wave_period_max"),
+        "pasang_surut":      daily.get("sea_level_height_msl_max"),
     })
 
 
@@ -87,7 +154,7 @@ def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> pd.DataFram
     params = {
         "latitude": lat,
         "longitude": lon,
-        "daily": "wind_speed_10m_max,wind_direction_10m_dominant,shortwave_radiation_sum",
+        "daily": "wind_speed_10m_max,wind_direction_10m_dominant,shortwave_radiation_sum,weather_code",
         "start_date": start,
         "end_date": end,
         "timezone": "UTC",
@@ -106,6 +173,9 @@ def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> pd.DataFram
     if not dates:
         return pd.DataFrame()
 
+    weather_codes = daily.get("weather_code", [None] * len(dates))
+    cuaca_labels = [_wmo_to_label(c) for c in weather_codes]
+
     return pd.DataFrame({
         "tanggal":          pd.to_datetime(dates),
         "latitude":         lat,
@@ -113,6 +183,7 @@ def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> pd.DataFram
         "kecepatan_angin":  daily.get("wind_speed_10m_max"),
         "arah_angin":       daily.get("wind_direction_10m_dominant"),
         "radiasi_matahari": daily.get("shortwave_radiation_sum"),
+        "cuaca":            cuaca_labels,
     })
 
 
@@ -123,18 +194,38 @@ def collect(
     bbox: Optional[dict[str, float]] = None,
     grid_resolution: float = DEFAULT_GRID_RESOLUTION,
     raw_dir: str = DEFAULT_RAW_DIR,
+    wpp_only: bool = True,
 ) -> pd.DataFrame:
     """
-    Collect wave + weather data from Open-Meteo for a grid over Indonesia.
+    Collect wave, weather, tidal, and depth data from Open-Meteo for Indonesian waters.
 
     Returns DataFrame with columns:
       tanggal, latitude, longitude,
-      tinggi_gelombang, periode_gelombang,
-      kecepatan_angin, arah_angin, radiasi_matahari, sumber_data
+      tinggi_gelombang, periode_gelombang, pasang_surut,
+      kecepatan_angin, arah_angin, radiasi_matahari, cuaca,
+      kedalaman_laut, sumber_data
+
+    Parameters
+    ----------
+    wpp_only : bool
+        If True (default), only collect grid points within WPP regions.
+        If False, collect over the full Indonesia bbox.
     """
-    bbox = bbox or INDONESIA_BBOX
     start, end = _clamp_date_range(start_date, end_date)
-    grid = _build_grid(bbox, grid_resolution)
+
+    if bbox:
+        grid = _build_grid(bbox, grid_resolution)
+    elif wpp_only:
+        grid = _build_wpp_grid(grid_resolution)
+    else:
+        grid = _build_grid(INDONESIA_BBOX, grid_resolution)
+
+    # Fetch elevation/depth for all grid points in batches of 100
+    depth_map: dict[tuple[float, float], float] = {}
+    batch_size = 100
+    for i in range(0, len(grid), batch_size):
+        batch = grid[i:i + batch_size]
+        depth_map.update(_fetch_elevation_batch(batch))
 
     marine_frames: list[pd.DataFrame] = []
     forecast_frames: list[pd.DataFrame] = []
@@ -146,6 +237,8 @@ def collect(
         m = _fetch_marine(lat, lon, start, end)
         f = _fetch_forecast(lat, lon, start, end)
         if not m.empty:
+            depth = depth_map.get((lat, lon))
+            m["kedalaman_laut"] = depth
             marine_frames.append(m)
         if not f.empty:
             forecast_frames.append(f)
@@ -164,6 +257,10 @@ def collect(
         df = pd.concat(marine_frames, ignore_index=True)
     else:
         df = pd.concat(forecast_frames, ignore_index=True)
+
+    # Ensure kedalaman_laut column exists even if only forecast frames
+    if "kedalaman_laut" not in df.columns:
+        df["kedalaman_laut"] = None
 
     df["sumber_data"] = SOURCE_NAME
     df = df.head(max_records)
