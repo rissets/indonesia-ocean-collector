@@ -91,6 +91,39 @@ def _db_conn():
     )
 
 
+def load_wpp_lookup(conn) -> dict[str, int]:
+    """
+    Load master_wpp into a dict keyed by WPP number string (e.g. "712" → id).
+    Also keys by full kode_wpp (e.g. "WPP-712" → id) for flexible matching.
+    """
+    lookup: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, kode_wpp FROM master_wpp")
+        for row_id, kode in cur.fetchall():
+            lookup[kode] = row_id                          # "WPP-712"
+            num = kode.replace("WPP-", "").strip()
+            lookup[num] = row_id                           # "712"
+    return lookup
+
+
+def resolve_wpp_id(id_wpp_str: Any, wpp_lookup: dict[str, int]) -> Optional[int]:
+    """
+    Parse id_wpp field from KKP API (e.g. "712, 713" or "712") and return
+    the master_wpp.id for the first matching WPP number.
+    """
+    if not id_wpp_str:
+        return None
+    parts = [p.strip() for p in str(id_wpp_str).split(",")]
+    for part in parts:
+        # strip any "WPP-RI " or "WPP-" prefix, keep the number
+        num = part.replace("WPP-RI", "").replace("WPP-", "").strip()
+        if num in wpp_lookup:
+            return wpp_lookup[num]
+        if part in wpp_lookup:
+            return wpp_lookup[part]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # API fetchers
 # ---------------------------------------------------------------------------
@@ -241,12 +274,9 @@ def _map_kapal_detail(detail: dict) -> dict:
     API fields available:
       no_bkp, nama_kapal, tanda_selar, ukuran_gt, nomor_transmitter,
       pemilik_kapal, alat_tangkap / jenis_alat_tangkap, kekuatan_mesin,
-      merk_mesin, nama_wpp, nama_pelabuhan_pangkalan, ping_time
+      merk_mesin, nama_wpp, id_wpp, nama_pelabuhan_pangkalan, ping_time
     """
-    # Combine alat_tangkap code + jenis name for a readable value
     alat = _safe_str(detail.get("jenis_alat_tangkap") or detail.get("alat_tangkap"), 100)
-
-    # wilayah_tangkap: use nama_wpp (comma-separated WPP names)
     wilayah = _safe_str(detail.get("nama_wpp"), 100)
 
     return {
@@ -262,10 +292,12 @@ def _map_kapal_detail(detail: dict) -> dict:
         "wilayah_tangkap":     wilayah,
         "pelabuhan_pangkalan": _safe_str(detail.get("nama_pelabuhan_pangkalan"), 150),
         "aktif":               True,
+        # raw id_wpp string from API (e.g. "712, 713") — used by tracking mapper
+        "_id_wpp_raw":         detail.get("id_wpp"),
     }
 
 
-def _map_tracking_row(raw: dict, nomor_bkp: str, nama_kapal: str, transmitter_no: str) -> dict:
+def _map_tracking_row(raw: dict, nomor_bkp: str, nama_kapal: str, transmitter_no: str, wpp_id: Optional[int] = None) -> dict:
     return {
         "nama_kapal":     _safe_str(nama_kapal, 100),
         "nomor_bkp":      _safe_str(nomor_bkp, 50),
@@ -277,6 +309,7 @@ def _map_tracking_row(raw: dict, nomor_bkp: str, nama_kapal: str, transmitter_no
         "speed":          _safe_decimal(raw.get("speed")),
         "timestamp":      raw.get("ping_time") or raw.get("timestamp") or raw.get("waktu"),
         "status_kapal":   None,
+        "wpp_id":         wpp_id,
         "source":         "KKP_VMS",
     }
 
@@ -351,11 +384,11 @@ def upsert_vessel_tracking_batch(conn, tracking_rows: list[dict]) -> int:
         INSERT INTO master_vessel_tracking (
             nama_kapal, nomor_bkp, transmitter_no,
             mmsi, latitude, longitude, direction, speed,
-            timestamp, status_kapal, source
+            timestamp, status_kapal, wpp_id, source
         ) VALUES (
             %(nama_kapal)s, %(nomor_bkp)s, %(transmitter_no)s,
             %(mmsi)s, %(latitude)s, %(longitude)s, %(direction)s, %(speed)s,
-            %(timestamp)s, %(status_kapal)s, %(source)s
+            %(timestamp)s, %(status_kapal)s, %(wpp_id)s, %(source)s
         )
         ON CONFLICT DO NOTHING
     """
@@ -377,18 +410,19 @@ def upsert_vessel_tracking_batch(conn, tracking_rows: list[dict]) -> int:
 # Main collection entry points
 # ---------------------------------------------------------------------------
 
-def collect_master_kapal(conn, enrich_detail: bool = True) -> tuple[int, list[dict]]:
+def collect_master_kapal(conn, enrich_detail: bool = True) -> tuple[int, list[dict], dict[str, Any]]:
     """
     Phase 1: fetch all kapal from search endpoint → upsert basic rows.
     Phase 2 (optional): fetch data-kapal detail per vessel → enrich master_kapal.
 
-    Returns (total_upserted, raw_kapal_list).
+    Returns (total_upserted, raw_kapal_list, id_wpp_by_bkp).
+    id_wpp_by_bkp maps nomor_bkp → raw id_wpp string from API (e.g. "712, 713").
     """
     logger.info("Fetching kapal list from KKP Datamart ...")
     raw_list = fetch_all_kapal()
     if not raw_list:
         logger.warning("No kapal returned from KKP API")
-        return 0, []
+        return 0, [], {}
 
     logger.info("Fetched %d kapal records", len(raw_list))
 
@@ -399,30 +433,38 @@ def collect_master_kapal(conn, enrich_detail: bool = True) -> tuple[int, list[di
     upserted = upsert_master_kapal(conn, basic_rows)
     logger.info("master_kapal basic pass: %d/%d rows upserted", upserted, len(basic_rows))
 
+    id_wpp_by_bkp: dict[str, Any] = {}
+
     if not enrich_detail:
-        return upserted, raw_list
+        return upserted, raw_list, id_wpp_by_bkp
 
     # Phase 2: enrich with full detail from data-kapal endpoint
     logger.info("Enriching master_kapal with data-kapal detail ...")
     enriched = 0
     for i, kapal in enumerate(raw_list, 1):
         transmitter_no = str(kapal.get("transmitter_no") or "").strip()
+        nomor_bkp = str(kapal.get("nomor_buku_kapal") or kapal.get("nomor_bkp") or "").strip()
         if not transmitter_no:
             continue
 
         detail = fetch_kapal_detail(transmitter_no)
         if detail:
             detail_row = _map_kapal_detail(detail)
-            if detail_row.get("nomor_bkp"):
-                n = upsert_master_kapal(conn, [detail_row])
+            # Store raw id_wpp for tracking phase
+            if nomor_bkp and detail_row.get("_id_wpp_raw") is not None:
+                id_wpp_by_bkp[nomor_bkp] = detail_row["_id_wpp_raw"]
+            # Remove internal key before DB upsert
+            db_row = {k: v for k, v in detail_row.items() if not k.startswith("_")}
+            if db_row.get("nomor_bkp"):
+                n = upsert_master_kapal(conn, [db_row])
                 enriched += n
 
         if i % 100 == 0:
             logger.info("  Enriched %d/%d vessels", i, len(raw_list))
         time.sleep(RATE_LIMIT_DELAY)
 
-    logger.info("master_kapal enrichment: %d vessels updated", enriched)
-    return upserted, raw_list
+    logger.info("master_kapal enrichment: %d vessels updated, %d with wpp data", enriched, len(id_wpp_by_bkp))
+    return upserted, raw_list, id_wpp_by_bkp
 
 
 def collect_vessel_tracking(
@@ -431,14 +473,20 @@ def collect_vessel_tracking(
     interval: int = 30,
     max_vessels: Optional[int] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    wpp_lookup: Optional[dict[str, int]] = None,
+    id_wpp_by_bkp: Optional[dict[str, Any]] = None,
 ) -> int:
     """
     Iterate kapal list, fetch tracking data per vessel, batch-insert into master_vessel_tracking.
     Commits every `batch_size` rows for memory efficiency.
+    wpp_lookup: kode/number → master_wpp.id (loaded once at startup)
+    id_wpp_by_bkp: nomor_bkp → raw id_wpp string from API (e.g. "712, 713")
     """
     total_inserted = 0
     pending: list[dict] = []
     vessels = kapal_list[:max_vessels] if max_vessels else kapal_list
+    _wpp_lookup = wpp_lookup or {}
+    _id_wpp_by_bkp = id_wpp_by_bkp or {}
 
     for i, kapal in enumerate(vessels, 1):
         nomor_bkp      = str(kapal.get("nomor_buku_kapal") or kapal.get("nomor_bkp") or "").strip()
@@ -448,12 +496,14 @@ def collect_vessel_tracking(
         if not nomor_bkp:
             continue
 
-        logger.info("[%d/%d] Tracking %s (bkp=%s tx=%s)", i, len(vessels), nama_kapal, nomor_bkp, transmitter_no)
+        wpp_id = resolve_wpp_id(_id_wpp_by_bkp.get(nomor_bkp), _wpp_lookup)
+
+        logger.info("[%d/%d] Tracking %s (bkp=%s tx=%s wpp_id=%s)", i, len(vessels), nama_kapal, nomor_bkp, transmitter_no, wpp_id)
         raw_tracks = fetch_vessel_tracking(nomor_bkp, interval=interval)
 
         if raw_tracks:
             rows = [
-                _map_tracking_row(t, nomor_bkp, nama_kapal, transmitter_no)
+                _map_tracking_row(t, nomor_bkp, nama_kapal, transmitter_no, wpp_id=wpp_id)
                 for t in raw_tracks
             ]
             rows = [r for r in rows if r["latitude"] is not None and r["longitude"] is not None]
@@ -505,12 +555,17 @@ def run(
 
     conn = _db_conn()
     try:
-        kapal_upserted, kapal_list = collect_master_kapal(conn, enrich_detail=enrich_detail)
+        wpp_lookup = load_wpp_lookup(conn)
+        logger.info("Loaded %d WPP entries for id_wpp resolution", len(wpp_lookup))
+
+        kapal_upserted, kapal_list, id_wpp_by_bkp = collect_master_kapal(conn, enrich_detail=enrich_detail)
         tracking_inserted = collect_vessel_tracking(
             conn, kapal_list,
             interval=tracking_interval,
             max_vessels=max_vessels,
             batch_size=batch_size,
+            wpp_lookup=wpp_lookup,
+            id_wpp_by_bkp=id_wpp_by_bkp,
         )
     finally:
         conn.close()

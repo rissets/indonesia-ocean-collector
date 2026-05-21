@@ -114,13 +114,14 @@ with DAG(
         command=(
             f"{PSQL_CMD} -c \""
             "SELECT "
-            "  (SELECT COUNT(*) FROM master_kapal)                                    AS kapal_total, "
-            "  (SELECT COUNT(*) FROM master_kapal WHERE tanda_selar  IS NOT NULL)     AS kapal_enriched, "
-            "  (SELECT COUNT(*) FROM master_kapal WHERE pemilik      IS NOT NULL)     AS has_pemilik, "
-            "  (SELECT COUNT(*) FROM master_kapal WHERE alat_tangkap IS NOT NULL)     AS has_alat_tangkap, "
-            "  (SELECT COUNT(*) FROM master_vessel_tracking)                          AS tracking_total, "
+            "  (SELECT COUNT(*) FROM master_kapal)                                       AS kapal_total, "
+            "  (SELECT COUNT(*) FROM master_kapal WHERE tanda_selar  IS NOT NULL)        AS kapal_enriched, "
+            "  (SELECT COUNT(*) FROM master_kapal WHERE pemilik      IS NOT NULL)        AS has_pemilik, "
+            "  (SELECT COUNT(*) FROM master_kapal WHERE alat_tangkap IS NOT NULL)        AS has_alat_tangkap, "
+            "  (SELECT COUNT(*) FROM master_vessel_tracking)                             AS tracking_total, "
             "  (SELECT COUNT(*) FROM master_vessel_tracking WHERE direction IS NOT NULL) AS has_direction, "
-            "  (SELECT MAX(timestamp) FROM master_vessel_tracking)                    AS latest_ping;"
+            "  (SELECT COUNT(*) FROM master_vessel_tracking WHERE wpp_id    IS NOT NULL) AS has_wpp_id, "
+            "  (SELECT MAX(timestamp) FROM master_vessel_tracking)                       AS latest_ping;"
             "\" 2>&1"
         ),
         cmd_timeout=60,
@@ -201,10 +202,11 @@ with DAG(
         command=(
             f"{PSQL_CMD} -c \""
             "SELECT "
-            "  (SELECT COUNT(*) FROM master_kapal)                                AS kapal_total, "
-            "  (SELECT COUNT(*) FROM master_kapal WHERE tanda_selar IS NOT NULL)  AS kapal_enriched, "
-            "  (SELECT COUNT(*) FROM master_vessel_tracking)                      AS tracking_total, "
-            "  (SELECT MAX(timestamp) FROM master_vessel_tracking)                AS latest_ping;"
+            "  (SELECT COUNT(*) FROM master_kapal)                                       AS kapal_total, "
+            "  (SELECT COUNT(*) FROM master_kapal WHERE tanda_selar IS NOT NULL)         AS kapal_enriched, "
+            "  (SELECT COUNT(*) FROM master_vessel_tracking)                             AS tracking_total, "
+            "  (SELECT COUNT(*) FROM master_vessel_tracking WHERE wpp_id IS NOT NULL)    AS has_wpp_id, "
+            "  (SELECT MAX(timestamp) FROM master_vessel_tracking)                       AS latest_ping;"
             "\" 2>&1"
         ),
         cmd_timeout=60,
