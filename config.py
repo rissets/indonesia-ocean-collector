@@ -60,6 +60,20 @@ GFW_BASE_URL = "https://gateway.api.globalfishingwatch.org/v3"
 GFW_FISHING_EFFORT_DATASET = "public-global-fishing-effort:latest"
 
 # ---------------------------------------------------------------------------
+# Copernicus Marine Service (client credentials flow)
+# ---------------------------------------------------------------------------
+CMEMS_CLIENT_ID:     str = "sh-1898f573-1cf2-493b-b86c-3f768cf3dcc3"
+CMEMS_CLIENT_SECRET: str = "OpvdaQVK1yvJCsaMEBXNVKGVtyiaWqjI"
+
+# ---------------------------------------------------------------------------
+# PostgreSQL — master_oceanography
+# ---------------------------------------------------------------------------
+DB_HOST: str = "localhost"
+DB_PORT: int = 5432
+DB_NAME: str = "maritime-os"
+DB_USER: str = "maritime-os"
+
+# ---------------------------------------------------------------------------
 # Fishing Ground Index weights
 # ---------------------------------------------------------------------------
 FGI_CHLOROPHYLL_WEIGHT: float = 0.6
