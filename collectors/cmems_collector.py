@@ -235,20 +235,25 @@ def collect_all(
             bbox=bbox,
             max_records=max_records,
         )
-        df = df.rename(columns={
-            "thetao": "sst_celsius",
-            "uo": "u_current_ms",
-            "vo": "v_current_ms",
-            "zos": "ssh_m",
-        })
-        # Merge chlorophyll separately (different dataset)
-        chl = collect_chlorophyll(start_date, end_date, max_records, bbox, raw_dir)
-        df = df.merge(
-            chl[["time", "latitude", "longitude", "chlorophyll_mgm3"]],
-            on=["time", "latitude", "longitude"],
-            how="left",
-        )
-        df["source"] = SOURCE_NAME
+        if df.empty:
+            logger.warning("CMEMS real download returned empty — falling back to mock data.")
+            df = _generate_mock_grid(start_date, end_date, bbox, max_records)
+        else:
+            df = df.rename(columns={
+                "thetao": "sst_celsius",
+                "uo": "u_current_ms",
+                "vo": "v_current_ms",
+                "zos": "ssh_m",
+            })
+            # Merge chlorophyll separately (different dataset)
+            chl = collect_chlorophyll(start_date, end_date, max_records, bbox, raw_dir)
+            if not chl.empty and "time" in chl.columns:
+                df = df.merge(
+                    chl[["time", "latitude", "longitude", "chlorophyll_mgm3"]],
+                    on=["time", "latitude", "longitude"],
+                    how="left",
+                )
+            df["source"] = SOURCE_NAME
     else:
         df = _generate_mock_grid(start_date, end_date, bbox, max_records)
 

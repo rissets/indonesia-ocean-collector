@@ -38,8 +38,12 @@ SOURCE_NAME = "Open-Meteo"
 
 _MARINE_URL    = "https://marine-api.open-meteo.com/v1/marine"
 _FORECAST_URL  = "https://api.open-meteo.com/v1/forecast"
+_ARCHIVE_URL   = "https://archive-api.open-meteo.com/v1/archive"
 _ELEV_URL      = "https://api.open-meteo.com/v1/elevation"
 _REQUEST_TIMEOUT = 30
+
+# Forecast API only covers ~7 days into the past; use archive for older dates
+_FORECAST_LOOKBACK_DAYS = 7
 
 # WMO weather code → human-readable label (subset covering marine conditions)
 _WMO_CODES: dict[int, str] = {
@@ -109,7 +113,11 @@ def _fetch_elevation_batch(points: list[tuple[float, float]]) -> dict[tuple[floa
         result = {}
         for pt, elev in zip(points, elevations):
             if elev is not None and elev < 0:
+                # Negative elevation = confirmed below sea level, use abs as depth
                 result[pt] = round(abs(float(elev)), 2)
+            elif elev is not None and elev == 0.0:
+                # 0.0 from elevation API means ocean surface — depth unknown from this API
+                result[pt] = None
             else:
                 result[pt] = None
         return result
@@ -119,38 +127,76 @@ def _fetch_elevation_batch(points: list[tuple[float, float]]) -> dict[tuple[floa
 
 
 def _fetch_marine(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
-    params = {
+    # Fetch wave variables as daily
+    wave_params = {
         "latitude": lat,
         "longitude": lon,
-        "daily": "wave_height_max,wave_period_max,sea_level_height_msl_max",
+        "daily": "wave_height_max,wave_period_max",
+        "start_date": start,
+        "end_date": end,
+        "timezone": "UTC",
+    }
+    # Fetch sea level as hourly (no daily aggregate available), then take daily max
+    tidal_params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "sea_level_height_msl",
         "start_date": start,
         "end_date": end,
         "timezone": "UTC",
     }
     try:
-        resp = requests.get(_MARINE_URL, params=params, timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
+        wave_resp = requests.get(_MARINE_URL, params=wave_params, timeout=_REQUEST_TIMEOUT)
+        wave_resp.raise_for_status()
+        wave_data = wave_resp.json()
     except Exception as exc:
-        logger.debug("Marine API failed lat=%.2f lon=%.2f: %s", lat, lon, exc)
+        logger.debug("Marine wave API failed lat=%.2f lon=%.2f: %s", lat, lon, exc)
         return pd.DataFrame()
 
-    daily = data.get("daily", {})
+    daily = wave_data.get("daily", {})
     dates = daily.get("time", [])
     if not dates:
         return pd.DataFrame()
 
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "tanggal":           pd.to_datetime(dates),
         "latitude":          lat,
         "longitude":         lon,
         "tinggi_gelombang":  daily.get("wave_height_max"),
         "periode_gelombang": daily.get("wave_period_max"),
-        "pasang_surut":      daily.get("sea_level_height_msl_max"),
     })
+
+    # Fetch tidal data separately and aggregate hourly → daily max
+    try:
+        tidal_resp = requests.get(_MARINE_URL, params=tidal_params, timeout=_REQUEST_TIMEOUT)
+        tidal_resp.raise_for_status()
+        tidal_data = tidal_resp.json()
+        hourly = tidal_data.get("hourly", {})
+        htimes = hourly.get("time", [])
+        hvals  = hourly.get("sea_level_height_msl", [])
+        if htimes and hvals:
+            tidal_df = pd.DataFrame({
+                "hour":  pd.to_datetime(htimes),
+                "sea_level": hvals,
+            })
+            tidal_df["tanggal"] = tidal_df["hour"].dt.normalize()
+            daily_tidal = tidal_df.groupby("tanggal")["sea_level"].max().reset_index()
+            daily_tidal = daily_tidal.rename(columns={"sea_level": "pasang_surut"})
+            df = df.merge(daily_tidal, on="tanggal", how="left")
+        else:
+            df["pasang_surut"] = None
+    except Exception as exc:
+        logger.debug("Marine tidal API failed lat=%.2f lon=%.2f: %s", lat, lon, exc)
+        df["pasang_surut"] = None
+
+    return df
 
 
 def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
+    # Use archive API for historical dates (older than FORECAST_LOOKBACK_DAYS)
+    cutoff = (pd.Timestamp.now("UTC").normalize() - pd.Timedelta(days=_FORECAST_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    url = _ARCHIVE_URL if start < cutoff else _FORECAST_URL
+
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -161,7 +207,7 @@ def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> pd.DataFram
         "wind_speed_unit": "ms",
     }
     try:
-        resp = requests.get(_FORECAST_URL, params=params, timeout=_REQUEST_TIMEOUT)
+        resp = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -220,15 +266,13 @@ def collect(
     else:
         grid = _build_grid(INDONESIA_BBOX, grid_resolution)
 
-    # Fetch elevation/depth for all grid points in batches of 100
     depth_map: dict[tuple[float, float], float] = {}
     batch_size = 100
     for i in range(0, len(grid), batch_size):
         batch = grid[i:i + batch_size]
         depth_map.update(_fetch_elevation_batch(batch))
 
-    marine_frames: list[pd.DataFrame] = []
-    forecast_frames: list[pd.DataFrame] = []
+    point_frames: list[pd.DataFrame] = []
     collected = 0
 
     for lat, lon in grid:
@@ -236,29 +280,34 @@ def collect(
             break
         m = _fetch_marine(lat, lon, start, end)
         f = _fetch_forecast(lat, lon, start, end)
-        if not m.empty:
+
+        if m.empty and f.empty:
+            collected += 1
+            continue
+
+        key = ["tanggal", "latitude", "longitude"]
+        if not m.empty and not f.empty:
             depth = depth_map.get((lat, lon))
             m["kedalaman_laut"] = depth
-            marine_frames.append(m)
-        if not f.empty:
-            forecast_frames.append(f)
-        collected += max(len(m), len(f), 1)
+            merged = m.merge(f, on=key, how="outer")
+        elif not m.empty:
+            depth = depth_map.get((lat, lon))
+            m["kedalaman_laut"] = depth
+            merged = m
+        else:
+            merged = f
+            merged["kedalaman_laut"] = None
 
-    if not marine_frames and not forecast_frames:
+        point_frames.append(merged)
+        collected += len(merged)
+
+    if not point_frames:
         logger.warning("Open-Meteo returned no data.")
         return pd.DataFrame()
 
-    key = ["tanggal", "latitude", "longitude"]
-    if marine_frames and forecast_frames:
-        df = pd.concat(marine_frames, ignore_index=True).merge(
-            pd.concat(forecast_frames, ignore_index=True), on=key, how="outer"
-        )
-    elif marine_frames:
-        df = pd.concat(marine_frames, ignore_index=True)
-    else:
-        df = pd.concat(forecast_frames, ignore_index=True)
+    df = pd.concat(point_frames, ignore_index=True)
 
-    # Ensure kedalaman_laut column exists even if only forecast frames
+    # Ensure kedalaman_laut column exists
     if "kedalaman_laut" not in df.columns:
         df["kedalaman_laut"] = None
 
