@@ -32,10 +32,22 @@ SOURCE_NAME = "CMEMS"
 MOCK_SOURCE = "CMEMS_MOCK"
 
 
+def _assign_wpp(df: pd.DataFrame) -> pd.DataFrame:
+    """Add wpp_region column based on latitude/longitude."""
+    def _find(lat: float, lon: float) -> str:
+        for name, bbox in WPP_REGIONS.items():
+            if bbox["min_lat"] <= lat <= bbox["max_lat"] and bbox["min_lon"] <= lon <= bbox["max_lon"]:
+                return name
+        return "OUTSIDE_WPP"
+    df = df.copy()
+    df["wpp_region"] = df.apply(lambda r: _find(r["latitude"], r["longitude"]), axis=1)
+    return df
+
+
 def _has_credentials() -> bool:
     return bool(
-        os.getenv("COPERNICUSMARINE_SERVICE_USERNAME")
-        and os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD")
+        (os.getenv("COPERNICUSMARINE_SERVICE_USERNAME") or os.getenv("CMEMS_CLIENT_ID"))
+        and (os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD") or os.getenv("CMEMS_CLIENT_SECRET"))
     )
 
 
@@ -253,6 +265,7 @@ def collect_all(
         df = _generate_mock_grid(start_date, end_date, bbox, max_records)
 
     _save_raw(df, "cmems_all", start_date, end_date, raw_dir)
+    df = _assign_wpp(df)
     logger.info("CMEMS all: %d records (source=%s).", len(df), df["source"].iloc[0] if len(df) else "none")
     return df
 
@@ -273,6 +286,14 @@ def _collect_cmems_real(
     except ImportError as exc:
         logger.error("Missing dependency: %s. Run: pip install copernicusmarine xarray", exc)
         return pd.DataFrame()
+
+    # Support both standard and alternate env var names
+    username = os.getenv("COPERNICUSMARINE_SERVICE_USERNAME") or os.getenv("CMEMS_CLIENT_ID")
+    password = os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD") or os.getenv("CMEMS_CLIENT_SECRET")
+    if username:
+        os.environ["COPERNICUSMARINE_SERVICE_USERNAME"] = username
+    if password:
+        os.environ["COPERNICUSMARINE_SERVICE_PASSWORD"] = password
 
     with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
         tmp_path = tmp.name

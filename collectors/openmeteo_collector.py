@@ -22,15 +22,31 @@ import numpy as np
 import pandas as pd
 import requests
 
-from config import DEFAULT_MAX_RECORDS, DEFAULT_RAW_DIR, INDONESIA_BBOX
+from config import DEFAULT_MAX_RECORDS, DEFAULT_RAW_DIR, INDONESIA_BBOX, WPP_REGIONS
 
 logger = logging.getLogger(__name__)
 SOURCE_NAME = "Open-Meteo"
 
 _MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 _SESSION = requests.Session()
 _SESSION.headers.update({"Accept-Encoding": "gzip"})
+
+# Forecast API only covers ~90 days back from today; use archive for older dates
+_FORECAST_LOOKBACK_DAYS = 80
+
+
+def _assign_wpp(df: pd.DataFrame) -> pd.DataFrame:
+    """Add wpp_region column based on latitude/longitude."""
+    def _find(lat: float, lon: float) -> str:
+        for name, bbox in WPP_REGIONS.items():
+            if bbox["min_lat"] <= lat <= bbox["max_lat"] and bbox["min_lon"] <= lon <= bbox["max_lon"]:
+                return name
+        return "OUTSIDE_WPP"
+    df = df.copy()
+    df["wpp_region"] = df.apply(lambda r: _find(r["latitude"], r["longitude"]), axis=1)
+    return df
 
 
 def _grid_points(bbox: dict, resolution: float) -> list[tuple[float, float]]:
@@ -58,6 +74,9 @@ def _fetch_marine(lat: float, lon: float, start: str, end: str) -> dict | None:
 
 
 def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> dict | None:
+    """Fetch wind + solar data. Uses archive API for historical dates, forecast for recent."""
+    cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(days=_FORECAST_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    url = _FORECAST_URL if start >= cutoff else _ARCHIVE_URL
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -68,11 +87,11 @@ def _fetch_forecast(lat: float, lon: float, start: str, end: str) -> dict | None
         "wind_speed_unit": "ms",
     }
     try:
-        r = _SESSION.get(_FORECAST_URL, params=params, timeout=30)
+        r = _SESSION.get(url, params=params, timeout=30)
         r.raise_for_status()
         return r.json()
     except Exception as exc:
-        logger.debug("Forecast API error at (%.2f, %.2f): %s", lat, lon, exc)
+        logger.debug("Forecast/archive API error at (%.2f, %.2f): %s", lat, lon, exc)
         return None
 
 
@@ -171,6 +190,7 @@ def collect_weather(
         return pd.DataFrame()
 
     result = pd.concat(all_dfs, ignore_index=True).head(max_records)
+    result = _assign_wpp(result)
     _save_raw(result, "openmeteo_weather", start_date, end_date, raw_dir)
     logger.info("Open-Meteo: %d records collected.", len(result))
     return result

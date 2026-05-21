@@ -53,24 +53,25 @@ INSERT INTO master_oceanography (
     tinggi_gelombang, periode_gelombang,
     kecepatan_angin, arah_angin,
     radiasi_matahari, cuaca,
-    sumber_data
+    sumber_data, wpp
 )
 VALUES %s
 ON CONFLICT (tanggal, latitude, longitude, sumber_data)
 DO UPDATE SET
-    suhu_permukaan   = EXCLUDED.suhu_permukaan,
-    sst              = EXCLUDED.sst,
-    ssh              = EXCLUDED.ssh,
-    klorofil         = EXCLUDED.klorofil,
-    arus_laut_u      = EXCLUDED.arus_laut_u,
-    arus_laut_v      = EXCLUDED.arus_laut_v,
-    kecepatan_arus   = EXCLUDED.kecepatan_arus,
-    tinggi_gelombang = EXCLUDED.tinggi_gelombang,
-    periode_gelombang= EXCLUDED.periode_gelombang,
-    kecepatan_angin  = EXCLUDED.kecepatan_angin,
-    arah_angin       = EXCLUDED.arah_angin,
-    radiasi_matahari = EXCLUDED.radiasi_matahari,
-    cuaca            = EXCLUDED.cuaca
+    suhu_permukaan   = COALESCE(EXCLUDED.suhu_permukaan,   master_oceanography.suhu_permukaan),
+    sst              = COALESCE(EXCLUDED.sst,              master_oceanography.sst),
+    ssh              = COALESCE(EXCLUDED.ssh,              master_oceanography.ssh),
+    klorofil         = COALESCE(EXCLUDED.klorofil,         master_oceanography.klorofil),
+    arus_laut_u      = COALESCE(EXCLUDED.arus_laut_u,      master_oceanography.arus_laut_u),
+    arus_laut_v      = COALESCE(EXCLUDED.arus_laut_v,      master_oceanography.arus_laut_v),
+    kecepatan_arus   = COALESCE(EXCLUDED.kecepatan_arus,   master_oceanography.kecepatan_arus),
+    tinggi_gelombang = COALESCE(EXCLUDED.tinggi_gelombang, master_oceanography.tinggi_gelombang),
+    periode_gelombang= COALESCE(EXCLUDED.periode_gelombang,master_oceanography.periode_gelombang),
+    kecepatan_angin  = COALESCE(EXCLUDED.kecepatan_angin,  master_oceanography.kecepatan_angin),
+    arah_angin       = COALESCE(EXCLUDED.arah_angin,       master_oceanography.arah_angin),
+    radiasi_matahari = COALESCE(EXCLUDED.radiasi_matahari, master_oceanography.radiasi_matahari),
+    cuaca            = COALESCE(EXCLUDED.cuaca,            master_oceanography.cuaca),
+    wpp              = COALESCE(EXCLUDED.wpp,              master_oceanography.wpp)
 """
 
 
@@ -86,23 +87,24 @@ def _row(r: pd.Series) -> tuple:
         speed = round((u**2 + v**2) ** 0.5, 4)
 
     return (
-        _f("tanggal") or _f("time"),
-        _f("latitude"),
-        _f("longitude"),
-        _f("sst_celsius") or _f("suhu_permukaan"),
-        _f("sst_celsius") or _f("sst"),
-        _f("ssh_m") or _f("ssh"),
-        _f("chlorophyll_mgm3") or _f("klorofil"),
-        u,
-        v,
-        speed,
-        _f("wave_height_m") or _f("tinggi_gelombang"),
-        _f("wave_period_s") or _f("periode_gelombang"),
-        _f("wind_speed_ms") or _f("kecepatan_angin"),
-        _f("wind_direction_deg") or _f("arah_angin"),
-        _f("solar_radiation_wm2") or _f("radiasi_matahari"),
-        _f("cuaca"),
-        _f("source") or _f("sumber_data"),
+        _f("tanggal") or _f("time"),       # 0
+        _f("latitude"),                     # 1
+        _f("longitude"),                    # 2
+        _f("sst_celsius") or _f("suhu_permukaan"),  # 3
+        _f("sst_celsius") or _f("sst"),    # 4
+        _f("ssh_m") or _f("ssh"),          # 5
+        _f("chlorophyll_mgm3") or _f("klorofil"),   # 6
+        u,                                  # 7
+        v,                                  # 8
+        speed,                              # 9
+        _f("wave_height_m") or _f("tinggi_gelombang"),   # 10
+        _f("wave_period_s") or _f("periode_gelombang"),  # 11
+        _f("wind_speed_ms") or _f("kecepatan_angin"),    # 12
+        _f("wind_direction_deg") or _f("arah_angin"),    # 13
+        _f("solar_radiation_wm2") or _f("radiasi_matahari"),  # 14
+        _f("cuaca"),                        # 15
+        _f("source") or _f("sumber_data"), # 16
+        _f("wpp_region") or _f("wpp_hint") or _f("wpp"),  # 17
     )
 
 
@@ -112,7 +114,7 @@ def upsert_dataframe(df: pd.DataFrame, batch_size: int = 1000) -> int:
         return 0
 
     rows = [_row(r) for _, r in df.iterrows()]
-    # Filter rows missing required key fields
+    # Filter rows missing required key fields (tanggal, latitude, longitude, sumber_data)
     rows = [r for r in rows if r[0] is not None and r[1] is not None and r[2] is not None and r[16] is not None]
 
     if not rows:

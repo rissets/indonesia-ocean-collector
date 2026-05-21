@@ -128,7 +128,7 @@ def collect_sst(
                 df = df.rename(columns={"sst": "sst_celsius"})
                 df = df.dropna(subset=["sst_celsius"])
                 if region_name:
-                    df["wpp_hint"] = region_name
+                    df["wpp_region"] = region_name
                 all_dfs.append(df)
 
     if not all_dfs:
@@ -170,7 +170,7 @@ def collect_chlorophyll(
                 df = df.rename(columns={"chlorophyll": "chlorophyll_mgm3"})
                 df = df.dropna(subset=["chlorophyll_mgm3"])
                 if region_name:
-                    df["wpp_hint"] = region_name
+                    df["wpp_region"] = region_name
                 all_dfs.append(df)
 
     if not all_dfs:
@@ -225,7 +225,7 @@ def collect_ssh_currents(
                         how="outer"
                     )
                 if region_name:
-                    merged["wpp_hint"] = region_name
+                    merged["wpp_region"] = region_name
                 all_dfs.append(merged)
 
     if not all_dfs:
