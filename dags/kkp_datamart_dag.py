@@ -3,8 +3,8 @@ Airflow DAG: KKP Datamart Collector
 
 Schedules:
   - Daily run (kkp_datamart_daily): collects all vessels + tracking, runs at 01:00 UTC
-  - Backfill / full re-collect (kkp_datamart_backfill): manual trigger, supports
-    --max-vessels and --no-enrich flags for targeted runs
+  - Full re-collect with truncate (kkp_datamart_recollect): manual trigger,
+    TRUNCATEs both tables then re-collects everything fresh
 
 The DAG runs on the maritime-master VM via SSHOperator, executing the collector
 inside the indonesia-ocean-collector virtualenv.
@@ -38,7 +38,7 @@ PSQL_CMD      = "PGPASSWORD='@Maritime210526' psql -h 127.0.0.1 -U maritime-os -
 
 
 # ---------------------------------------------------------------------------
-# Daily DAG — full collect: all vessels + tracking
+# Daily DAG — full collect: all vessels + tracking (no truncate)
 # ---------------------------------------------------------------------------
 with DAG(
     dag_id="kkp_datamart_daily",
@@ -58,7 +58,7 @@ with DAG(
             f"cd {COLLECTOR_DIR} && "
             f"{VENV_PYTHON} -m collectors.kkp_datamart_collector "
             "--interval 30 "
-            "--batch-size 500 "
+            "--batch-size 10000 "
             "--log-level INFO "
             "2>&1"
         ),
@@ -86,27 +86,22 @@ with DAG(
 
 
 # ---------------------------------------------------------------------------
-# Backfill / targeted re-collect DAG (manual trigger)
+# Full re-collect DAG — TRUNCATE then collect fresh (manual trigger)
 # ---------------------------------------------------------------------------
 with DAG(
-    dag_id="kkp_datamart_backfill",
-    description="Manual KKP Datamart re-collect with configurable scope",
+    dag_id="kkp_datamart_recollect",
+    description="Full re-collect: TRUNCATE master_kapal + master_vessel_tracking then collect fresh",
     default_args=DEFAULT_ARGS,
-    start_date=datetime(2026, 1, 1),
+    start_date=datetime(2026, 5, 21),
     schedule_interval=None,  # manual trigger only
     catchup=False,
     max_active_runs=1,
-    tags=["kkp", "kapal", "tracking", "maritime", "backfill"],
+    tags=["kkp", "kapal", "tracking", "maritime", "recollect"],
     params={
-        "max_vessels": Param(
-            default=0,
-            type="integer",
-            description="Limit tracking to first N vessels (0 = all)",
-        ),
         "batch_size": Param(
-            default=500,
+            default=10000,
             type="integer",
-            description="Commit every N tracking rows",
+            description="Commit every N tracking rows (default 10000)",
         ),
         "tracking_interval": Param(
             default=30,
@@ -119,14 +114,26 @@ with DAG(
             description="Skip data-kapal detail enrichment (faster, fewer columns)",
         ),
     },
-) as backfill_dag:
+) as recollect_dag:
 
-    def _build_backfill_cmd(**context) -> str:
+    truncate_tables = SSHOperator(
+        task_id="truncate_tables",
+        ssh_conn_id="maritime_master_ssh",
+        command=(
+            f"{PSQL_CMD} -c \""
+            "TRUNCATE TABLE master_vessel_tracking; "
+            "TRUNCATE TABLE master_kapal CASCADE;"
+            "\" 2>&1"
+        ),
+        cmd_timeout=120,
+        conn_timeout=30,
+    )
+
+    def _build_recollect_cmd(**context) -> str:
         p = context["params"]
-        max_v   = int(p.get("max_vessels", 0))
-        batch   = int(p.get("batch_size", 500))
-        intv    = int(p.get("tracking_interval", 30))
-        no_enr  = bool(p.get("skip_enrich", False))
+        batch  = int(p.get("batch_size", 10000))
+        intv   = int(p.get("tracking_interval", 30))
+        no_enr = bool(p.get("skip_enrich", False))
 
         cmd = (
             f"cd {COLLECTOR_DIR} && "
@@ -135,23 +142,21 @@ with DAG(
             f"--batch-size {batch} "
             "--log-level INFO "
         )
-        if max_v > 0:
-            cmd += f"--max-vessels {max_v} "
         if no_enr:
             cmd += "--no-enrich "
         cmd += "2>&1"
         return cmd
 
-    run_backfill = SSHOperator(
-        task_id="run_kkp_backfill",
+    run_collect = SSHOperator(
+        task_id="collect_all",
         ssh_conn_id="maritime_master_ssh",
-        command=_build_backfill_cmd,
-        cmd_timeout=14400,  # 4 hours for full historical re-collect
+        command=_build_recollect_cmd,
+        cmd_timeout=14400,  # 4 hours for full re-collect
         conn_timeout=30,
     )
 
-    verify_backfill = SSHOperator(
-        task_id="verify_backfill_counts",
+    verify_recollect = SSHOperator(
+        task_id="verify_counts",
         ssh_conn_id="maritime_master_ssh",
         command=(
             f"{PSQL_CMD} -c \""
@@ -169,4 +174,4 @@ with DAG(
         conn_timeout=30,
     )
 
-    run_backfill >> verify_backfill
+    truncate_tables >> run_collect >> verify_recollect

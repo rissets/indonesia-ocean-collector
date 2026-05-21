@@ -35,7 +35,7 @@ REQUEST_TIMEOUT = 30
 RATE_LIMIT_DELAY = 0.3  # seconds between per-vessel requests
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0
-DEFAULT_BATCH_SIZE = 500  # commit every N tracking rows
+DEFAULT_BATCH_SIZE = 10000  # commit every N tracking rows
 
 
 # ---------------------------------------------------------------------------
@@ -282,15 +282,26 @@ def _map_tracking_row(raw: dict, nomor_bkp: str, nama_kapal: str, transmitter_no
 
 
 # ---------------------------------------------------------------------------
-# DB upsert helpers
+# DB helpers
 # ---------------------------------------------------------------------------
+
+def truncate_tables(conn) -> None:
+    """TRUNCATE master_kapal and master_vessel_tracking to start fresh."""
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE master_vessel_tracking")
+        cur.execute("TRUNCATE TABLE master_kapal CASCADE")
+    conn.commit()
+    logger.info("Truncated master_kapal and master_vessel_tracking")
+
 
 def upsert_master_kapal(conn, kapal_rows: list[dict]) -> int:
     """
-    Upsert into master_kapal. Conflict key: nomor_bkp.
+    Upsert into master_kapal in a single executemany batch. Conflict key: nomor_bkp.
     Uses COALESCE so enriched detail fields don't overwrite with NULL
     when called from the basic search pass.
     """
+    if not kapal_rows:
+        return 0
     sql = """
         INSERT INTO master_kapal (
             nama_kapal, nomor_bkp, no_transmitter,
@@ -317,22 +328,16 @@ def upsert_master_kapal(conn, kapal_rows: list[dict]) -> int:
             aktif               = EXCLUDED.aktif,
             updated_at          = NOW()
     """
-    inserted = 0
     with conn.cursor() as cur:
-        for row in kapal_rows:
-            try:
-                cur.execute(sql, row)
-                inserted += 1
-            except Exception as exc:
-                logger.warning("Skipping kapal row (nomor_bkp=%s): %s", row.get("nomor_bkp"), exc)
-                conn.rollback()
-                continue
-        conn.commit()
+        psycopg2.extras.execute_batch(cur, sql, kapal_rows, page_size=len(kapal_rows))
+    conn.commit()
+    inserted = len(kapal_rows)
+    logger.info("master_kapal batch upsert: %d rows committed", inserted)
     return inserted
 
 
 def upsert_vessel_tracking_batch(conn, tracking_rows: list[dict]) -> int:
-    """Batch-insert tracking rows; skip duplicates via ON CONFLICT DO NOTHING."""
+    """Batch-insert tracking rows via execute_batch; skip duplicates via ON CONFLICT DO NOTHING."""
     if not tracking_rows:
         return 0
     sql = """
@@ -347,18 +352,10 @@ def upsert_vessel_tracking_batch(conn, tracking_rows: list[dict]) -> int:
         )
         ON CONFLICT DO NOTHING
     """
-    inserted = 0
     with conn.cursor() as cur:
-        for row in tracking_rows:
-            try:
-                cur.execute(sql, row)
-                inserted += 1
-            except Exception as exc:
-                logger.warning("Skipping tracking row: %s", exc)
-                conn.rollback()
-                continue
-        conn.commit()
-    return inserted
+        psycopg2.extras.execute_batch(cur, sql, tracking_rows, page_size=1000)
+    conn.commit()
+    return len(tracking_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +469,7 @@ def run(
     max_vessels: Optional[int] = None,
     enrich_detail: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    truncate: bool = False,
 ) -> dict[str, int]:
     """
     Full collection run: kapal registry (+ optional detail enrichment) + vessel tracking.
@@ -481,7 +479,8 @@ def run(
     tracking_interval : int   Interval in minutes for location data (default 30)
     max_vessels       : int   Limit vessel tracking to first N vessels (None = all)
     enrich_detail     : bool  Fetch data-kapal detail to fill all master_kapal columns (default True)
-    batch_size        : int   Commit tracking rows every N records (default 500)
+    batch_size        : int   Commit tracking rows every N records (default 10000)
+    truncate          : bool  TRUNCATE tables before collecting (default False)
     """
     logger.info("=" * 60)
     logger.info("KKP Datamart Collector starting")
@@ -489,10 +488,13 @@ def run(
     logger.info("  max_vessels       : %s", max_vessels or "all")
     logger.info("  enrich_detail     : %s", enrich_detail)
     logger.info("  batch_size        : %d", batch_size)
+    logger.info("  truncate          : %s", truncate)
     logger.info("=" * 60)
 
     conn = _db_conn()
     try:
+        if truncate:
+            truncate_tables(conn)
         kapal_upserted, kapal_list = collect_master_kapal(conn, enrich_detail=enrich_detail)
         tracking_inserted = collect_vessel_tracking(
             conn, kapal_list,
@@ -529,6 +531,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-vessels",    type=int,  default=None, help="Limit tracking to first N vessels")
     parser.add_argument("--batch-size",     type=int,  default=DEFAULT_BATCH_SIZE, help=f"Commit every N tracking rows (default: {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--no-enrich",      action="store_true",     help="Skip data-kapal detail enrichment (faster, fewer columns)")
+    parser.add_argument("--truncate",       action="store_true",     help="TRUNCATE tables before collecting (delete all existing data)")
     parser.add_argument("--log-level",      default="INFO",          help="Logging level (default: INFO)")
     args = parser.parse_args()
 
@@ -539,4 +542,5 @@ if __name__ == "__main__":
         max_vessels=args.max_vessels,
         enrich_detail=not args.no_enrich,
         batch_size=args.batch_size,
+        truncate=args.truncate,
     )
