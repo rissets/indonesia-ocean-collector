@@ -33,10 +33,27 @@ MOCK_SOURCE = "CMEMS_MOCK"
 
 
 def _has_credentials() -> bool:
-    return bool(
+    # Support both legacy username/password and new client_id/secret flow
+    has_legacy = bool(
         os.getenv("COPERNICUSMARINE_SERVICE_USERNAME")
         and os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD")
     )
+    has_client = bool(
+        os.getenv("CMEMS_CLIENT_ID")
+        and os.getenv("CMEMS_CLIENT_SECRET")
+    )
+    return has_legacy or has_client
+
+
+def _configure_credentials() -> None:
+    """Set env vars expected by copernicusmarine SDK from client credentials if needed."""
+    if os.getenv("COPERNICUSMARINE_SERVICE_USERNAME"):
+        return  # legacy creds already set
+    client_id = os.getenv("CMEMS_CLIENT_ID")
+    secret = os.getenv("CMEMS_CLIENT_SECRET")
+    if client_id and secret:
+        os.environ["COPERNICUSMARINE_SERVICE_USERNAME"] = client_id
+        os.environ["COPERNICUSMARINE_SERVICE_PASSWORD"] = secret
 
 
 def _generate_mock_grid(
@@ -273,6 +290,8 @@ def _collect_cmems_real(
     except ImportError as exc:
         logger.error("Missing dependency: %s. Run: pip install copernicusmarine xarray", exc)
         return pd.DataFrame()
+
+    _configure_credentials()
 
     with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
         tmp_path = tmp.name
