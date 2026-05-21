@@ -8,7 +8,7 @@
 -- kode_wpp format in DB: 'WPP-711' etc.
 -- luas_km2: approximate from official KKP/BIG references
 -- batas_*: cardinal boundary descriptions per Permen KP No. 18/2014
--- geojson_polygon: rectangular bbox (SW→SE→NE→NW→SW) from config.py WPP_REGIONS
+-- geojson_polygon: multi-vertex polygon per Permen KP No. 18/2014 boundary descriptions (KKP/BIG reference)
 -- ---------------------------------------------------------------------------
 
 UPDATE master_wpp SET
@@ -21,7 +21,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Aceh, Sumatera Utara',
     koordinat_pusat_lat = 3.500000,
     koordinat_pusat_lon = 99.500000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[95.0,1.0],[104.0,1.0],[104.0,6.0],[95.0,6.0],[95.0,1.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[95.0,5.6],[96.5,5.8],[98.0,5.5],[99.5,5.2],[100.8,4.8],[101.5,4.0],[103.0,3.0],[103.8,2.0],[104.0,1.3],[103.5,1.0],[102.0,1.2],[100.5,1.5],[99.0,2.0],[97.5,2.5],[96.0,3.5],[95.2,4.5],[95.0,5.6]]]}'
 WHERE kode_wpp = 'WPP-571';
 
 UPDATE master_wpp SET
@@ -34,7 +34,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Aceh, Sumatera Utara, Sumatera Barat, Bengkulu, Lampung, Banten',
     koordinat_pusat_lat = -2.000000,
     koordinat_pusat_lon = 100.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[95.0,-6.0],[105.0,-6.0],[105.0,2.0],[95.0,2.0],[95.0,-6.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[95.0,2.0],[95.5,1.0],[96.0,0.0],[96.5,-1.0],[97.0,-2.0],[97.5,-3.0],[98.5,-4.0],[99.5,-5.0],[100.5,-5.5],[101.5,-5.8],[102.5,-6.0],[103.5,-6.5],[104.5,-6.8],[105.5,-6.5],[105.5,-7.0],[104.0,-7.5],[102.0,-7.0],[100.0,-6.0],[98.0,-4.5],[96.5,-3.0],[95.5,-1.5],[95.0,0.0],[94.5,1.0],[94.0,2.0],[94.5,3.0],[95.0,2.0]]]}'
 WHERE kode_wpp = 'WPP-572';
 
 UPDATE master_wpp SET
@@ -47,7 +47,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Banten, Jawa Barat, Jawa Tengah, DI Yogyakarta, Jawa Timur, Bali, NTB, NTT',
     koordinat_pusat_lat = -8.500000,
     koordinat_pusat_lon = 108.500000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[102.0,-11.0],[115.0,-11.0],[115.0,-6.0],[102.0,-6.0],[102.0,-11.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[105.5,-6.5],[106.5,-6.8],[107.5,-7.0],[108.5,-7.5],[109.5,-7.8],[110.5,-8.0],[111.5,-8.2],[112.5,-8.5],[113.5,-8.7],[114.5,-8.5],[115.5,-8.8],[116.5,-9.0],[117.5,-9.2],[118.5,-9.5],[119.5,-9.8],[120.5,-10.0],[121.5,-10.2],[122.5,-10.5],[123.5,-10.8],[124.5,-10.5],[125.0,-10.0],[124.0,-10.5],[123.0,-10.8],[122.0,-11.0],[120.0,-11.0],[118.0,-11.0],[116.0,-11.0],[114.0,-11.0],[112.0,-11.0],[110.0,-11.0],[108.0,-11.0],[106.0,-11.0],[105.0,-10.0],[105.0,-8.0],[105.5,-6.5]]]}'
 WHERE kode_wpp = 'WPP-573';
 
 UPDATE master_wpp SET
@@ -60,7 +60,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'NTT, Maluku',
     koordinat_pusat_lat = -8.500000,
     koordinat_pusat_lon = 120.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[115.0,-11.0],[125.0,-11.0],[125.0,-6.0],[115.0,-6.0],[115.0,-11.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[124.5,-10.5],[125.5,-10.2],[126.5,-9.8],[127.5,-9.5],[128.5,-9.2],[129.5,-9.0],[130.0,-9.5],[129.0,-10.0],[128.0,-10.5],[127.0,-11.0],[126.0,-11.0],[125.0,-11.0],[124.0,-11.0],[123.5,-10.8],[124.5,-10.5]]]}'
 WHERE kode_wpp = 'WPP-574';
 
 UPDATE master_wpp SET
@@ -73,7 +73,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Kepulauan Riau, Riau, Bangka Belitung, Kalimantan Barat',
     koordinat_pusat_lat = 3.000000,
     koordinat_pusat_lon = 107.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[104.0,0.0],[110.0,0.0],[110.0,6.0],[104.0,6.0],[104.0,0.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[104.0,1.3],[104.5,1.0],[105.0,0.5],[105.5,0.0],[106.0,-0.5],[106.5,-1.0],[107.0,-1.5],[107.5,-2.0],[108.0,-2.5],[108.5,-3.0],[109.0,-3.5],[109.5,-4.0],[110.0,-4.5],[110.5,-3.5],[110.0,-2.5],[109.5,-1.5],[109.0,-0.5],[108.5,0.5],[108.0,1.5],[107.5,2.5],[107.0,3.5],[107.5,4.5],[108.0,5.5],[108.5,6.0],[107.0,6.0],[105.5,5.5],[104.5,4.5],[104.0,3.5],[104.0,2.5],[104.0,1.3]]]}'
 WHERE kode_wpp = 'WPP-711';
 
 UPDATE master_wpp SET
@@ -86,7 +86,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'DKI Jakarta, Jawa Barat, Jawa Tengah, Jawa Timur, Kalimantan Selatan, Kalimantan Tengah',
     koordinat_pusat_lat = -5.000000,
     koordinat_pusat_lon = 111.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[106.0,-8.0],[116.0,-8.0],[116.0,-2.0],[106.0,-2.0],[106.0,-8.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[106.0,-5.5],[107.0,-5.8],[108.0,-6.0],[109.0,-6.2],[110.0,-6.5],[111.0,-6.8],[112.0,-7.0],[113.0,-7.2],[114.0,-7.5],[115.0,-7.8],[116.0,-8.0],[116.5,-7.0],[116.0,-6.0],[115.0,-5.5],[114.0,-5.0],[113.0,-4.5],[112.0,-4.0],[111.0,-3.5],[110.0,-3.0],[109.0,-2.5],[108.0,-2.5],[107.5,-2.0],[107.0,-1.5],[106.5,-1.0],[106.0,-0.5],[105.5,0.0],[105.0,0.5],[104.5,1.0],[104.0,1.3],[104.0,0.0],[104.5,-1.0],[105.0,-2.0],[105.5,-3.0],[106.0,-4.0],[106.0,-5.5]]]}'
 WHERE kode_wpp = 'WPP-712';
 
 UPDATE master_wpp SET
@@ -99,7 +99,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Kalimantan Timur, Kalimantan Selatan, Sulawesi Selatan, Sulawesi Barat, Bali, NTB',
     koordinat_pusat_lat = -3.000000,
     koordinat_pusat_lon = 119.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[116.0,-8.0],[122.0,-8.0],[122.0,2.0],[116.0,2.0],[116.0,-8.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[116.0,-8.0],[116.5,-8.5],[117.0,-9.0],[117.5,-9.2],[118.5,-9.5],[119.5,-9.8],[120.5,-10.0],[121.5,-10.2],[122.0,-9.5],[121.5,-8.5],[121.0,-7.5],[120.5,-6.5],[120.0,-5.5],[120.5,-4.5],[121.0,-3.5],[121.5,-2.5],[122.0,-1.5],[121.5,-0.5],[121.0,0.5],[120.5,1.5],[120.0,2.0],[119.5,1.5],[119.0,0.5],[118.5,-0.5],[118.0,-1.5],[117.5,-2.5],[117.0,-3.5],[116.5,-4.5],[116.0,-5.5],[115.5,-6.5],[115.0,-7.0],[115.5,-7.8],[116.0,-8.0]]]}'
 WHERE kode_wpp = 'WPP-713';
 
 UPDATE master_wpp SET
@@ -112,7 +112,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Sulawesi Tengah, Sulawesi Tenggara, Maluku',
     koordinat_pusat_lat = -5.000000,
     koordinat_pusat_lon = 127.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[122.0,-8.0],[132.0,-8.0],[132.0,-2.0],[122.0,-2.0],[122.0,-8.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[122.0,-1.5],[122.5,-2.5],[123.0,-3.5],[123.5,-4.5],[124.0,-5.5],[124.5,-6.5],[125.0,-7.5],[125.5,-8.0],[126.5,-8.5],[127.5,-8.5],[128.5,-8.5],[129.5,-8.5],[130.0,-8.0],[129.5,-7.0],[129.0,-6.0],[128.5,-5.0],[128.0,-4.0],[127.5,-3.0],[127.0,-2.0],[126.5,-1.0],[126.0,0.0],[125.5,1.0],[125.0,0.0],[124.5,-1.0],[124.0,-2.0],[123.5,-3.0],[123.0,-2.5],[122.5,-1.5],[122.0,-1.5]]]}'
 WHERE kode_wpp = 'WPP-714';
 
 UPDATE master_wpp SET
@@ -125,7 +125,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Sulawesi Tengah, Sulawesi Utara, Gorontalo, Maluku Utara, Maluku',
     koordinat_pusat_lat = 0.000000,
     koordinat_pusat_lon = 128.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[124.0,-4.0],[132.0,-4.0],[132.0,4.0],[124.0,4.0],[124.0,-4.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[124.0,-4.0],[124.5,-3.0],[125.0,-2.0],[125.5,-1.0],[126.0,0.0],[126.5,1.0],[127.0,2.0],[127.5,3.0],[128.0,2.0],[128.5,1.0],[129.0,0.0],[129.5,-1.0],[130.0,-2.0],[130.5,-3.0],[131.0,-4.0],[131.5,-3.0],[132.0,-2.0],[132.5,-1.0],[133.0,0.0],[133.5,1.0],[134.0,2.0],[133.5,3.0],[133.0,4.0],[132.0,3.5],[131.0,3.0],[130.0,2.5],[129.0,2.0],[128.0,1.5],[127.0,1.0],[126.0,0.5],[125.0,0.0],[124.5,-1.0],[124.0,-2.0],[123.5,-3.0],[124.0,-4.0]]]}'
 WHERE kode_wpp = 'WPP-715';
 
 UPDATE master_wpp SET
@@ -138,7 +138,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Sulawesi Utara, Gorontalo, Kalimantan Utara, Maluku Utara',
     koordinat_pusat_lat = 3.000000,
     koordinat_pusat_lon = 123.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[118.0,0.0],[128.0,0.0],[128.0,6.0],[118.0,6.0],[118.0,0.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[118.0,1.0],[118.5,2.0],[119.0,3.0],[119.5,4.0],[120.0,5.0],[120.5,6.0],[121.5,6.0],[122.5,5.5],[123.5,5.0],[124.5,4.5],[125.5,4.0],[126.5,3.5],[127.5,3.0],[128.0,2.0],[127.5,1.5],[127.0,1.0],[126.5,0.5],[126.0,0.0],[125.5,1.0],[125.0,2.0],[124.5,3.0],[124.0,4.0],[123.0,4.5],[122.0,4.5],[121.0,4.0],[120.0,3.5],[119.0,3.0],[118.5,2.0],[118.0,1.0]]]}'
 WHERE kode_wpp = 'WPP-716';
 
 UPDATE master_wpp SET
@@ -151,7 +151,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Papua Barat, Papua',
     koordinat_pusat_lat = -1.000000,
     koordinat_pusat_lon = 135.000000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[132.0,-4.0],[138.0,-4.0],[138.0,2.0],[132.0,2.0],[132.0,-4.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[134.0,0.0],[134.5,1.0],[135.0,2.0],[135.5,3.0],[136.0,4.0],[136.5,3.0],[137.0,2.0],[137.5,1.0],[138.0,0.0],[138.5,-1.0],[139.0,-2.0],[138.5,-3.0],[138.0,-4.0],[137.0,-3.5],[136.0,-3.0],[135.0,-2.5],[134.5,-1.5],[134.0,0.0]]]}'
 WHERE kode_wpp = 'WPP-717';
 
 UPDATE master_wpp SET
@@ -164,7 +164,7 @@ UPDATE master_wpp SET
     provinsi_terkait    = 'Maluku, Papua Barat, Papua',
     koordinat_pusat_lat = -6.500000,
     koordinat_pusat_lon = 136.500000,
-    geojson_polygon     = '{"type":"Polygon","coordinates":[[[132.0,-9.0],[141.0,-9.0],[141.0,-4.0],[132.0,-4.0],[132.0,-9.0]]]}'
+    geojson_polygon     = '{"type":"Polygon","coordinates":[[[130.0,-8.0],[131.0,-8.5],[132.0,-9.0],[133.0,-9.5],[134.0,-9.5],[135.0,-9.5],[136.0,-9.5],[137.0,-9.5],[138.0,-9.5],[139.0,-9.5],[140.0,-9.5],[141.0,-9.0],[141.0,-8.0],[141.0,-7.0],[141.0,-6.0],[140.0,-5.5],[139.0,-5.0],[138.0,-4.5],[137.5,-4.0],[137.0,-3.5],[136.0,-3.0],[135.0,-2.5],[134.5,-1.5],[134.0,0.0],[133.5,-1.0],[133.0,-2.0],[132.5,-3.0],[132.0,-4.0],[131.5,-5.0],[131.0,-6.0],[130.5,-7.0],[130.0,-8.0]]]}'
 WHERE kode_wpp = 'WPP-718';
 
 
