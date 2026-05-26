@@ -9,7 +9,7 @@ across all of Indonesia, not just one corner of the bbox.
 
 Datasets used:
   SST        : erdMH1sstdmday_R2022SQNotMasked  (MODIS Aqua monthly, ~4km, gap-free)
-  Chlorophyll: erdMH1chlamday_R2022NRT           (MODIS Aqua monthly, ~4km)
+  Chlorophyll: erdMH1chlamday                    (MODIS Aqua monthly, ~4km)
   SSH + Currents: nesdisSSH1day                  (NESDIS altimetry daily, 0.25°, gap-free)
 """
 
@@ -22,6 +22,7 @@ from typing import Optional
 
 import pandas as pd
 import requests
+import urllib3.util.connection as urllib3_connection
 
 from config import (
     DEFAULT_MAX_RECORDS,
@@ -37,6 +38,10 @@ from config import (
 logger = logging.getLogger(__name__)
 SOURCE_NAME = "NOAA_ERDDAP"
 
+# Force IPv4 for ERDDAP requests. The VM repeatedly stalls on IPv6 SYN-SENT
+# to coastwatch.pfeg.noaa.gov, while IPv4 is reachable and stable.
+urllib3_connection.HAS_IPV6 = False
+
 # Records per WPP per month — keeps data evenly distributed
 _RECORDS_PER_CHUNK = 50
 
@@ -45,7 +50,9 @@ def _fetch_erddap_csv(url: str, max_rows: int) -> pd.DataFrame:
     """Fetch CSV from ERDDAP, skip units row, return DataFrame capped at max_rows."""
     logger.debug("Fetching: %s", url)
     try:
-        resp = requests.get(url, timeout=300)
+        # Keep connect timeout short so unreachable IPv6 routes do not stall
+        # batch backfill tasks for minutes before retrying on IPv4.
+        resp = requests.get(url, timeout=(20, 300))
         resp.raise_for_status()
     except requests.exceptions.HTTPError as exc:
         logger.warning("ERDDAP HTTP error: %s", exc)

@@ -4,9 +4,6 @@ Copernicus Marine Service (CMEMS) Collector.
 Requires credentials in .env:
   COPERNICUSMARINE_SERVICE_USERNAME=...
   COPERNICUSMARINE_SERVICE_PASSWORD=...
-
-Falls back to realistic mock data when credentials are absent,
-clearly marked with source="CMEMS_MOCK".
 """
 
 from __future__ import annotations
@@ -16,7 +13,6 @@ import os
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from config import (
@@ -29,72 +25,12 @@ from config import (
 logger = logging.getLogger(__name__)
 
 SOURCE_NAME = "CMEMS"
-MOCK_SOURCE = "CMEMS_MOCK"
-
 
 def _has_credentials() -> bool:
     return bool(
         os.getenv("COPERNICUSMARINE_SERVICE_USERNAME")
         and os.getenv("COPERNICUSMARINE_SERVICE_PASSWORD")
     )
-
-
-def _generate_mock_grid(
-    start_date: str,
-    end_date: str,
-    bbox: dict[str, float],
-    max_records: int,
-) -> pd.DataFrame:
-    """Generate realistic mock grid data for demo/CI when credentials absent."""
-    rng = np.random.default_rng(seed=42)
-    dates = pd.date_range(start_date, end_date, freq="MS")
-    lats = np.arange(bbox["min_lat"], bbox["max_lat"], 1.0)
-    lons = np.arange(bbox["min_lon"], bbox["max_lon"], 1.0)
-
-    rows = []
-    for dt in dates:
-        for lat in lats:
-            for lon in lons:
-                rows.append({
-                    "time": dt,
-                    "latitude": round(lat, 2),
-                    "longitude": round(lon, 2),
-                })
-                if len(rows) >= max_records:
-                    break
-            if len(rows) >= max_records:
-                break
-        if len(rows) >= max_records:
-            break
-
-    df = pd.DataFrame(rows)
-    n = len(df)
-
-    # Realistic SST: 26–30°C tropical range with seasonal variation
-    month = df["time"].dt.month
-    df["sst_celsius"] = (
-        27.5
-        + rng.normal(0, 0.8, n)
-        + np.sin((month - 1) * np.pi / 6) * 1.2
-    ).round(3)
-
-    # Realistic chlorophyll: 0.05–1.5 mg/m³, log-normal
-    df["chlorophyll_mgm3"] = np.clip(
-        np.exp(rng.normal(-1.2, 0.8, n)), 0.01, 5.0
-    ).round(4)
-
-    # Currents: small values typical of Indonesian seas (m/s)
-    df["u_current_ms"] = rng.normal(0, 0.15, n).round(4)
-    df["v_current_ms"] = rng.normal(0, 0.15, n).round(4)
-
-    # SSH: sea surface height anomaly (m)
-    df["ssh_m"] = rng.normal(0, 0.08, n).round(4)
-
-    # Salinity: 32–35 PSU
-    df["salinity_psu"] = np.clip(rng.normal(33.5, 0.5, n), 30.0, 36.0).round(3)
-
-    df["source"] = MOCK_SOURCE
-    return df
 
 
 def collect_sst(
@@ -113,22 +49,18 @@ def collect_sst(
     """
     bbox = bbox or INDONESIA_BBOX
 
-    if _has_credentials():
-        df = _collect_cmems_real(
-            dataset_id="cmems_mod_glo_phy_my_0.083deg_P1D-m",
-            variables=["thetao"],
-            start_date=start_date,
-            end_date=end_date,
-            bbox=bbox,
-            max_records=max_records,
-        )
-        df = df.rename(columns={"thetao": "sst_celsius"})
-        df["source"] = SOURCE_NAME
-    else:
-        logger.warning("CMEMS credentials not found — using mock SST data.")
-        df = _generate_mock_grid(start_date, end_date, bbox, max_records)[
-            ["time", "latitude", "longitude", "sst_celsius", "source"]
-        ]
+    if not _has_credentials():
+        raise RuntimeError("CMEMS credentials are required; mock fallback is disabled for production.")
+    df = _collect_cmems_real(
+        dataset_id="cmems_mod_glo_phy_my_0.083deg_P1D-m",
+        variables=["thetao"],
+        start_date=start_date,
+        end_date=end_date,
+        bbox=bbox,
+        max_records=max_records,
+    )
+    df = df.rename(columns={"thetao": "sst_celsius"})
+    df["source"] = SOURCE_NAME
 
     _save_raw(df, "cmems_sst", start_date, end_date, raw_dir)
     logger.info("CMEMS SST: %d records (source=%s).", len(df), df["source"].iloc[0] if len(df) else "none")
@@ -151,22 +83,18 @@ def collect_chlorophyll(
     """
     bbox = bbox or INDONESIA_BBOX
 
-    if _has_credentials():
-        df = _collect_cmems_real(
-            dataset_id="cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1M",
-            variables=["CHL"],
-            start_date=start_date,
-            end_date=end_date,
-            bbox=bbox,
-            max_records=max_records,
-        )
-        df = df.rename(columns={"CHL": "chlorophyll_mgm3"})
-        df["source"] = SOURCE_NAME
-    else:
-        logger.warning("CMEMS credentials not found — using mock chlorophyll data.")
-        df = _generate_mock_grid(start_date, end_date, bbox, max_records)[
-            ["time", "latitude", "longitude", "chlorophyll_mgm3", "source"]
-        ]
+    if not _has_credentials():
+        raise RuntimeError("CMEMS credentials are required; mock fallback is disabled for production.")
+    df = _collect_cmems_real(
+        dataset_id="cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D",
+        variables=["CHL"],
+        start_date=start_date,
+        end_date=end_date,
+        bbox=bbox,
+        max_records=max_records,
+    )
+    df = df.rename(columns={"CHL": "chlorophyll_mgm3"})
+    df["source"] = SOURCE_NAME
 
     _save_raw(df, "cmems_chlorophyll", start_date, end_date, raw_dir)
     return df
@@ -188,22 +116,18 @@ def collect_currents(
     """
     bbox = bbox or INDONESIA_BBOX
 
-    if _has_credentials():
-        df = _collect_cmems_real(
-            dataset_id="cmems_mod_glo_phy_my_0.083deg_P1D-m",
-            variables=["uo", "vo", "zos"],
-            start_date=start_date,
-            end_date=end_date,
-            bbox=bbox,
-            max_records=max_records,
-        )
-        df = df.rename(columns={"uo": "u_current_ms", "vo": "v_current_ms", "zos": "ssh_m"})
-        df["source"] = SOURCE_NAME
-    else:
-        logger.warning("CMEMS credentials not found — using mock currents data.")
-        df = _generate_mock_grid(start_date, end_date, bbox, max_records)[
-            ["time", "latitude", "longitude", "u_current_ms", "v_current_ms", "ssh_m", "source"]
-        ]
+    if not _has_credentials():
+        raise RuntimeError("CMEMS credentials are required; mock fallback is disabled for production.")
+    df = _collect_cmems_real(
+        dataset_id="cmems_mod_glo_phy_my_0.083deg_P1D-m",
+        variables=["uo", "vo", "zos"],
+        start_date=start_date,
+        end_date=end_date,
+        bbox=bbox,
+        max_records=max_records,
+    )
+    df = df.rename(columns={"uo": "u_current_ms", "vo": "v_current_ms", "zos": "ssh_m"})
+    df["source"] = SOURCE_NAME
 
     _save_raw(df, "cmems_currents", start_date, end_date, raw_dir)
     logger.info("CMEMS currents: %d records.", len(df))
@@ -226,31 +150,50 @@ def collect_all(
     """
     bbox = bbox or INDONESIA_BBOX
 
-    if _has_credentials():
-        df = _collect_cmems_real(
-            dataset_id="cmems_mod_glo_phy_my_0.083deg_P1D-m",
-            variables=["thetao", "uo", "vo", "zos"],
-            start_date=start_date,
-            end_date=end_date,
-            bbox=bbox,
-            max_records=max_records,
+    if not _has_credentials():
+        raise RuntimeError("CMEMS credentials are required; mock fallback is disabled for production.")
+    df = _collect_cmems_real(
+        dataset_id="cmems_mod_glo_phy_my_0.083deg_P1D-m",
+        variables=["thetao", "uo", "vo", "zos"],
+        start_date=start_date,
+        end_date=end_date,
+        bbox=bbox,
+        max_records=max_records,
+    )
+    df = df.rename(columns={
+        "thetao": "sst_celsius",
+        "uo": "u_current_ms",
+        "vo": "v_current_ms",
+        "zos": "ssh_m",
+    })
+    chl = collect_chlorophyll(start_date, end_date, max_records, bbox, raw_dir)
+    if not chl.empty:
+        # Physical and biogeochemical products often use different grids.
+        # Merge chlorophyll by day and rounded coordinates for practical alignment.
+        phys = df.copy()
+        phys["date_key"] = pd.to_datetime(phys["time"], utc=True, errors="coerce").dt.date
+        phys["lat_key"] = pd.to_numeric(phys["latitude"], errors="coerce").round(1)
+        phys["lon_key"] = pd.to_numeric(phys["longitude"], errors="coerce").round(1)
+
+        bio = chl.copy()
+        bio["date_key"] = pd.to_datetime(bio["time"], utc=True, errors="coerce").dt.date
+        bio["lat_key"] = pd.to_numeric(bio["latitude"], errors="coerce").round(1)
+        bio["lon_key"] = pd.to_numeric(bio["longitude"], errors="coerce").round(1)
+        bio = (
+            bio[["date_key", "lat_key", "lon_key", "chlorophyll_mgm3"]]
+            .dropna(subset=["date_key", "lat_key", "lon_key", "chlorophyll_mgm3"])
+            .groupby(["date_key", "lat_key", "lon_key"], as_index=False)["chlorophyll_mgm3"]
+            .mean()
         )
-        df = df.rename(columns={
-            "thetao": "sst_celsius",
-            "uo": "u_current_ms",
-            "vo": "v_current_ms",
-            "zos": "ssh_m",
-        })
-        # Merge chlorophyll separately (different dataset)
-        chl = collect_chlorophyll(start_date, end_date, max_records, bbox, raw_dir)
-        df = df.merge(
-            chl[["time", "latitude", "longitude", "chlorophyll_mgm3"]],
-            on=["time", "latitude", "longitude"],
+
+        phys = phys.merge(
+            bio,
+            on=["date_key", "lat_key", "lon_key"],
             how="left",
         )
-        df["source"] = SOURCE_NAME
-    else:
-        df = _generate_mock_grid(start_date, end_date, bbox, max_records)
+        phys = phys.drop(columns=["date_key", "lat_key", "lon_key"])
+        df = phys
+    df["source"] = SOURCE_NAME
 
     _save_raw(df, "cmems_all", start_date, end_date, raw_dir)
     logger.info("CMEMS all: %d records (source=%s).", len(df), df["source"].iloc[0] if len(df) else "none")
@@ -274,36 +217,38 @@ def _collect_cmems_real(
         logger.error("Missing dependency: %s. Run: pip install copernicusmarine xarray", exc)
         return pd.DataFrame()
 
-    with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
-        tmp_path = tmp.name
-
     try:
-        copernicusmarine.subset(
-            dataset_id=dataset_id,
-            variables=variables,
-            minimum_longitude=bbox["min_lon"],
-            maximum_longitude=bbox["max_lon"],
-            minimum_latitude=bbox["min_lat"],
-            maximum_latitude=bbox["max_lat"],
-            start_datetime=f"{start_date}T00:00:00",
-            end_datetime=f"{end_date}T23:59:59",
-            minimum_depth=0,
-            maximum_depth=1,
-            output_filename=tmp_path,
-            force_download=True,
-        )
-        ds = xr.open_dataset(tmp_path)
-        df = ds.to_dataframe().reset_index()
-        df = df.dropna(subset=variables)
-        df = df.head(max_records)
-        df = df.rename(columns={"lon": "longitude", "lat": "latitude"})
-        return df
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = os.path.join(tmp_dir, "subset.nc")
+            copernicusmarine.subset(
+                dataset_id=dataset_id,
+                variables=variables,
+                minimum_longitude=bbox["min_lon"],
+                maximum_longitude=bbox["max_lon"],
+                minimum_latitude=bbox["min_lat"],
+                maximum_latitude=bbox["max_lat"],
+                start_datetime=f"{start_date}T00:00:00",
+                end_datetime=f"{end_date}T23:59:59",
+                minimum_depth=0,
+                maximum_depth=1,
+                output_directory=tmp_dir,
+                output_filename="subset.nc",
+                overwrite=True,
+            )
+            ds = xr.open_dataset(tmp_path, engine="netcdf4")
+            df = ds.to_dataframe().reset_index()
+            df = df.dropna(subset=variables)
+            # Avoid biased top-rows sampling (which often sticks to one latitude
+            # band) by taking evenly spaced rows across the full subset.
+            if len(df) > max_records:
+                step = len(df) / float(max_records)
+                indices = [int(i * step) for i in range(max_records)]
+                df = df.iloc[indices]
+            df = df.rename(columns={"lon": "longitude", "lat": "latitude"})
+            return df
     except Exception as exc:
         logger.error("CMEMS download failed: %s", exc)
         return pd.DataFrame()
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
 
 def _save_raw(df: pd.DataFrame, prefix: str, start: str, end: str, raw_dir: str) -> None:

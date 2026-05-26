@@ -35,3 +35,7 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+data/*
+/data
+data
+data/
